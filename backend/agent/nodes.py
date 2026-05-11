@@ -1,6 +1,23 @@
 from agent.state import AgentState
 from db.client import DBClient
+from agent.prompts import ANALYSIS_PROMPT
+from agent.prompts import ADVICE_PROMPT
+
+import json
+from dotenv import load_dotenv
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import ChatPromptTemplate
+
 import os
+
+load_dotenv()
+api_key = os.getenv("GOOGLE_API_KEY")
+
+llm = ChatGoogleGenerativeAI(
+    model="gemini-1.5-pro",
+    google_api_key=api_key,
+    temperature=0.1,
+)
 
 def run_explain_node(state: AgentState):
     # Node 1: Execute EXPLAIN ANALYZE
@@ -22,8 +39,54 @@ def run_explain_node(state: AgentState):
             "explain_output": plan,
             "error": None
         }
-    
     except Exception as e:
         return {
             "error": f"Database Execution Failure: {str(e)}"
         }
+
+
+def identify_issues(state: AgentState):
+    # Node 2: use LLM to identify DB issues from EXPLAIN PLAN
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", ANALYSIS_PROMPT),
+        ("user", "DDL: {ddl}\nExecution_Plan: {execution_plan}")
+    ])
+
+    chain = prompt | llm
+
+    response = chain.invoke({
+        "ddl": state.get("ddl"),
+        "execution_plan": state.get("explain_output")
+    })
+    
+    try:
+        issues = json.loads(response.content)
+        return {"issues": issues}
+    except json.JSONDecodeError:
+        return {"error": f"LLM returned unparseable response: {response.content}"}
+
+
+def generate_advice(state: AgentState):
+    # Node 3: generate advice based on issues found
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", ADVICE_PROMPT),
+        ("user", "SQL: {original_sql}\nIssues: {issues}")
+    ])
+
+    chain = prompt | llm
+
+    response = chain.invoke({
+        "original_sql": state.get("original_sql"),
+        "issues": state.get("issues")
+    })
+
+    try:
+        result = json.loads(response.content)
+        return {
+            "advice": result["advice"],
+            "optimized_sql": result["optimized_sql"]
+        }
+    except (json.JSONDecodeError, KeyError) as e:
+        return {"error": f"LLM returned unparseable response: {response.content}"}
+
+

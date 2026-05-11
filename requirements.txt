@@ -1,0 +1,4 @@
+psycopg2-binary
+python-dotenv
+langchain-google-genai
+langgraph

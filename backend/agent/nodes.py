@@ -90,3 +90,27 @@ def generate_advice(state: AgentState):
         return {"error": f"LLM returned unparseable response: {response.content}"}
 
 
+def generate_benchmark_schema(state: AgentState):
+    # Node 4: create benchmark schema for testing
+    dsn = os.getenv("DATABASE_URL")
+    if not dsn:
+        return {"error": "DATABASE_URL not set"}
+    
+    db_client = DBClient(dsn)
+
+    if not state.get("optimized_sql"):
+        return {"error": "No optimized SQL to benchmark"}
+
+    table_name = state.get("table_name")
+    original_sql = state.get("original_sql")
+    suggested_ddl = state.get("optimized_sql")
+
+    try:
+        new_plan = db_client.benchmark_in_sandbox(table_name, original_sql, suggested_ddl)
+        return {
+            "benchmark_result": new_plan
+        }
+    except Exception as e:
+        return {
+            "error": f"Database Execution Failure: {str(e)}"
+        }

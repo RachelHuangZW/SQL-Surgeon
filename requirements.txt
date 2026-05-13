@@ -2,3 +2,6 @@ psycopg2-binary
 python-dotenv
 langchain-google-genai
 langgraph
+langchain-core
+fastapi
+uvicorn

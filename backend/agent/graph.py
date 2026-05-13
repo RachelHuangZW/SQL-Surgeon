@@ -6,7 +6,19 @@ from agent.nodes import (
     generate_advice,
     generate_benchmark_schema
 )
-from db.client import DBClient
+
+def should_continue(state: AgentState):
+    if state.get("error"):
+        return "end"
+    return "continue"
+
+def should_benchmark(state: AgentState):
+    if state.get("error"):
+        return "end"
+    if state.get("table_name"):
+        return "benchmark"
+    return "end"
+
 
 def create_graph():
     workflow = StateGraph(AgentState)
@@ -18,9 +30,9 @@ def create_graph():
 
     workflow.set_entry_point("run_explain")
 
-    workflow.add_edge("run_explain", "identify_issue")
-    workflow.add_edge("identify_issue", "generate_advice")
-    workflow.add_edge("generate_advice", "generate_benchmark_schema")
+    workflow.add_conditional_edges("run_explain", should_continue, {"continue": "identify_issue", "end": END})
+    workflow.add_conditional_edges("identify_issue", should_continue, {"continue": "generate_advice", "end": END})
+    workflow.add_conditional_edges("generate_advice", should_benchmark, {"benchmark": "generate_benchmark_schema", "end": END})
     workflow.add_edge("generate_benchmark_schema", END)
     
     app = workflow.compile()

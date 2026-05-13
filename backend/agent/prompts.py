@@ -11,10 +11,10 @@ ANALYSIS_PROMPT = """你是一个数据库诊断专家。请根据执行计划�
 ADVICE_PROMPT = """你是一个顶级的 DBA。基于原始 SQL 和识别出的性能问题，给出具体的优化建议。
 
 只返回一个 JSON 对象，不要任何解释或额外文字，格式如下：
-{
+{{
   "advice": ["建议1", "建议2", "建议3"],
   "optimized_sql": "CREATE INDEX ... 或改写后的 SELECT ..."
-}
+}}
 
 要求：
 - advice 列表：每条是一句简洁的中文优化建议

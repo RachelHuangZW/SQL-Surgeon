@@ -14,10 +14,18 @@ load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
+    model="gemini-2.5-pro",
     google_api_key=api_key,
     temperature=0.1,
 )
+
+def strip_code_block(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1]
+        text = text.rsplit("```", 1)[0]
+    return text.strip()
+
 
 def run_explain_node(state: AgentState):
     # Node 1: Execute EXPLAIN ANALYZE
@@ -60,7 +68,7 @@ def identify_issues(state: AgentState):
     })
     
     try:
-        issues = json.loads(response.content)
+        issues = json.loads(strip_code_block(response.content))
         return {"issues": issues}
     except json.JSONDecodeError:
         return {"error": f"LLM returned unparseable response: {response.content}"}
@@ -81,7 +89,7 @@ def generate_advice(state: AgentState):
     })
 
     try:
-        result = json.loads(response.content)
+        result = json.loads(strip_code_block(response.content))
         return {
             "advice": result["advice"],
             "optimized_sql": result["optimized_sql"]

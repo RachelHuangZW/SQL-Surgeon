@@ -19,4 +19,7 @@ ADVICE_PROMPT = """你是一个顶级的 DBA。基于原始 SQL 和识别出的�
 
 要求：
 - advice 列表：每条是一句简洁的中文优化建议
-- optimized_sql：优先给出 CREATE INDEX 语句；如果 SQL 本身也需要改写，把索引 DDL 和改写后的 SQL 用换行拼在一起"""
+- optimized_sql：必须是一个完整的可执行脚本，包含以下两部分（用注释分隔）：
+  第一部分：CREATE INDEX 语句（如需要），注释为 "-- Step 1: 创建索引（只需执行一次）"
+  第二部分：优化后的原始查询（或改写后的 SQL），注释为 "-- Step 2: 执行优化后的查询"
+  用户应该能直接复制整个 optimized_sql 到数据库客户端顺序执行"""

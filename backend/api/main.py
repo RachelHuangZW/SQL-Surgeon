@@ -6,8 +6,8 @@ from typing import List, Optional
 from agent.graph import app as agent_graph
 
 app = FastAPI(
-    title = "",
-    description = "",
+    title = "SQL Surgeon",
+    description = "AI-powered PostgreSQL query optimizer",
     version = "1.0.0"
 )
 

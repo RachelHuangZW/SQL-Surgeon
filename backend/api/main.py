@@ -40,14 +40,14 @@ def health_check():
 @app.post("/api/diagnose")
 async def diagnose_sql(request: DiagnoseRequest):
     try:
-        intial_state = {
+        initial_state = {
             "original_sql": request.original_sql,
             "ddl": request.ddl,
             "table_name": request.table_name,
             "issues": [],
             "advice": []
         }
-        final_state = agent_graph.invoke(intial_state)
+        final_state = agent_graph.invoke(initial_state)
 
         if final_state.get("error"):
             return DiagnoseResponse(

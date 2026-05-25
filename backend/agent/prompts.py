@@ -1,25 +1,41 @@
-ANALYSIS_PROMPT = """你是一个数据库诊断专家。请根据执行计划和表结构 DDL，识别潜在的性能瓶颈。
-常见问题包括：
-- Seq Scan 发生在应该有索引的字段上
-- Join 产生巨大笛卡尔积
-- 排序使用磁盘临时文件 (External merge Disk)
-- 估算行数与实际行数偏差巨大
+ANALYSIS_PROMPT = """You are a database performance expert. Analyze the query execution plan and table DDL to identify performance bottlenecks.
 
-只返回一个 JSON 数组，不要任何解释或额外文字，格式如下：
-["问题描述1", "问题描述2", "问题描述3"]"""
+Common issues to look for:
+- Sequential scan (Seq Scan) on columns that should have an index
+- Large Cartesian products from poorly written JOINs
+- Sorting that spills to disk (External merge Disk)
+- Large discrepancy between estimated and actual row counts
+
+Return ONLY a JSON array with no explanation or extra text, in this format:
+["issue description 1", "issue description 2", "issue description 3"]"""
 
 
-ADVICE_PROMPT = """你是一个顶级的 DBA。基于原始 SQL 和识别出的性能问题，给出具体的优化建议。
+ADVICE_PROMPT = """You are a senior DBA. Based on the original SQL and the identified performance issues, provide specific optimization recommendations.
 
-只返回一个 JSON 对象，不要任何解释或额外文字，格式如下：
+Return ONLY a JSON object with no explanation or extra text, in this format:
 {{
-  "advice": ["建议1", "建议2", "建议3"],
-  "optimized_sql": "CREATE INDEX ... 或改写后的 SELECT ..."
+  "advice": ["recommendation 1", "recommendation 2", "recommendation 3"],
+  "optimized_sql": "CREATE INDEX ... or rewritten SELECT ..."
 }}
 
-要求：
-- advice 列表：每条是一句简洁的中文优化建议
-- optimized_sql：必须是一个完整的可执行脚本，包含以下两部分（用注释分隔）：
-  第一部分：CREATE INDEX 语句（如需要），注释为 "-- Step 1: 创建索引（只需执行一次）"
-  第二部分：优化后的原始查询（或改写后的 SQL），注释为 "-- Step 2: 执行优化后的查询"
-  用户应该能直接复制整个 optimized_sql 到数据库客户端顺序执行"""
+Requirements:
+- advice: each item is one concise English optimization recommendation
+- optimized_sql: must be a complete executable script with two sections separated by comments:
+  Section 1: CREATE INDEX statement (if needed), prefixed with "-- Step 1: Create index (run once)"
+  Section 2: the optimized query (original or rewritten), prefixed with "-- Step 2: Run the optimized query"
+  The user should be able to copy the entire optimized_sql and run it sequentially in their database client"""
+
+
+REVIEW_ADVICE_PROMPT = """You are a senior DBA reviewing the quality of SQL optimization advice produced by a junior engineer.
+
+Evaluate the advice against these criteria:
+1. Do the identified issues accurately reflect real bottlenecks in the execution plan (not just generic observations)?
+2. Does each piece of advice directly address one of the identified issues?
+3. Does optimized_sql include both Step 1 (index DDL) and Step 2 (optimized query), with correct syntax that can be executed immediately?
+4. Is the index design sound (correct column order, DESC/ASC direction, covers the query's filter and sort conditions)?
+
+Return ONLY a JSON object with no explanation or extra text, in this format:
+{{
+  "verdict": "pass" or "retry",
+  "feedback": "If verdict is retry, explain what is wrong and how to improve it. If verdict is pass, use an empty string."
+}}"""

@@ -9,6 +9,9 @@ class AgentState(TypedDict):
     advice: List[str]
     benchmark_result: Optional[List[dict]]
     optimized_sql: Optional[str]
+    verdict: Optional[str]
+    feedback: Optional[str]
+    retry_count: int
     error: Optional[str]
 
 

@@ -38,6 +38,30 @@ def fetch_ddl(conn, table_name: str) -> str:
     return f"CREATE TABLE {table_name} ({col_defs});"
 
 
+def get_explain_cost(conn, sql: str) -> float:
+    with conn.cursor() as cur:
+        cur.execute(f"EXPLAIN (FORMAT JSON) {sql}")
+        plan = cur.fetchone()[0]
+        total_cost = plan[0]["Plan"]["Total Cost"]
+    return total_cost
+
+
+def evaluate_with_hypopg(conn, sql: str, index_ddls: list) -> float:
+    with conn.cursor() as cur:
+        # First clean last hypopg execution
+        cur.execute("SELECT hypopg_reset()")
+        for ddl in index_ddls:
+            cur.execute("SELECT * FROM hypopg_create_index(%s)", (ddl,))
+        cur.execute(f"EXPLAIN (FORMAT JSON) {sql}")
+        plan = cur.fetchone()[0]
+        total_cost = plan[0]["Plan"]["Total Cost"]
+        # Clean hypopg before exit
+        cur.execute("SELECT hypopg_reset()")
+    return total_cost
+
+
+
+
 def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -68,6 +92,7 @@ def main():
         ddl = "\n".join(filter(None, ddl_parts))
 
         try:
+            b1_cost = get_explain_cost(conn, sql)
             state = agent_graph.invoke({
                 "original_sql": sql,
                 "ddl": ddl,
@@ -78,11 +103,18 @@ def main():
             result = {
                 "query": query_name,
                 "status": "error" if state.get("error") else "success",
+                # L1 execution cost
+                "b1_cost": b1_cost,
+                # Surgeon execution cost
+                "surgeon_cost": None,
+                # Agent output
                 "issues": state.get("issues"),
                 "advice": state.get("advice"),
                 "optimized_sql": state.get("optimized_sql"),
-                "verdict": state.get("verdict"),
+                # L3 internal health
                 "retry_count": state.get("retry_count"),
+                "verdict": state.get("verdict"),
+                "hit_max_retry": state.get("retry_count", 0) >= 2,
                 "error": state.get("error"),
                 "timestamp": datetime.now().isoformat(),
             }

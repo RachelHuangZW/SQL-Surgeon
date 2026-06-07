@@ -1,0 +1,24 @@
+{
+  "query": "11a",
+  "status": "success",
+  "b1_cost": 83136.5,
+  "surgeon_cost": null,
+  "issues": [
+    "Significant underestimation of rows (estimated 12, actual 15,070) in a Hash Join suggests stale statistics, leading to poor plan choices like nested loops with many iterations. Run ANALYZE on all tables involved in the query.",
+    "A Hash Join operation spills to disk (Hash Batches: 8, Temp Written Blocks: 3740), which is slow. This is caused by the row count underestimation leading to insufficient memory allocation. Consider increasing `work_mem`.",
+    "The filter `k.keyword = 'sequel'::text` is applied after an index scan on the primary key, which is inefficient. Create an index on the `keyword` column to allow for a direct lookup: CREATE INDEX ON keyword (keyword);",
+    "The filter on `company_name.name` uses a non-sargable `LIKE` condition (`~~ '%Film%'`). Create a trigram index for faster text searching: CREATE EXTENSION IF NOT EXISTS pg_trgm; CREATE INDEX ON company_name USING gin (name gin_trgm_ops);"
+  ],
+  "advice": [
+    "Update table statistics using `ANALYZE` on all involved tables to correct row count estimations and improve query planning.",
+    "Create a B-tree index on `keyword(keyword)` to allow for a direct and efficient lookup of the 'sequel' keyword.",
+    "Create a GIN trigram index on `company_name(name)` using the `pg_trgm` extension to significantly speed up wildcard `LIKE` searches.",
+    "Rewrite the query to use modern, explicit `JOIN` syntax instead of the implicit, comma-separated list in the `FROM` clause for better readability and maintainability."
+  ],
+  "optimized_sql": "-- Step 1: Create indexes (run once)\nCREATE EXTENSION IF NOT EXISTS pg_trgm;\nCREATE INDEX IF NOT EXISTS idx_keyword_keyword ON keyword (keyword);\nCREATE INDEX IF NOT EXISTS idx_company_name_name_gin ON company_name USING gin (name gin_trgm_ops);\n\n-- Step 2: Run the optimized query\nSELECT MIN(cn.name) AS from_company,\n       MIN(lt.link) AS movie_link_type,\n       MIN(t.title) AS non_polish_sequel_movie\nFROM title AS t\nJOIN movie_keyword AS mk ON t.id = mk.movie_id\nJOIN keyword AS k ON mk.keyword_id = k.id\nJOIN movie_link AS ml ON t.id = ml.movie_id\nJOIN link_type AS lt ON ml.link_type_id = lt.id\nJOIN movie_companies AS mc ON t.id = mc.movie_id\nJOIN company_name AS cn ON mc.company_id = cn.id\nJOIN company_type AS ct ON mc.company_type_id = ct.id\nWHERE t.production_year BETWEEN 1950 AND 2000\n  AND k.keyword = 'sequel'\n  AND lt.link LIKE '%follow%'\n  AND mc.note IS NULL\n  AND ct.kind = 'production companies'\n  AND cn.country_code != '[pl]'\n  AND (cn.name LIKE '%Film%' OR cn.name LIKE '%Warner%');",
+  "retry_count": 1,
+  "verdict": "pass",
+  "hit_max_retry": false,
+  "error": null,
+  "timestamp": "2026-06-06T17:43:26.078518"
+}

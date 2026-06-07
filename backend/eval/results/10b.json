@@ -1,0 +1,23 @@
+{
+  "query": "10b",
+  "status": "success",
+  "b1_cost": 480470.62,
+  "surgeon_cost": null,
+  "issues": [
+    "Sequential scan on `cast_info` caused by the non-SARGable filter `ci.note ~~ '%(producer)%'`. Consider a trigram index on the `note` column.",
+    "Sequential scan on `movie_companies`. An index on the join column `movie_id` would improve join performance.",
+    "Significant misestimation of rows for multiple joins. The planner estimates hundreds or thousands of rows, while the actual count is near zero. This may be caused by outdated statistics or complex predicates."
+  ],
+  "advice": [
+    "Create a GIN trigram index on `cast_info.note` to accelerate the `LIKE '%(producer)%'` search, making the filter SARGable.",
+    "Add B-tree indexes on foreign key columns heavily used in joins, specifically `movie_companies(movie_id)` and `cast_info(movie_id)`, to speed up the join process.",
+    "Update table statistics by running `ANALYZE` on all tables in the query. This is crucial for fixing the planner's row count misestimations and enabling it to choose an efficient execution plan.",
+    "Rewrite the query using Common Table Expressions (CTEs) to pre-filter sets of IDs. This simplifies the final join and can guide the optimizer to a more efficient plan."
+  ],
+  "optimized_sql": "-- Step 1: Create index (run once)\nCREATE EXTENSION IF NOT EXISTS pg_trgm;\n\n-- Create a GIN index for the non-SARGable LIKE search\nCREATE INDEX idx_gin_ci_note ON cast_info USING gin (note gin_trgm_ops);\n\n-- Create indexes on foreign keys to improve join performance\nCREATE INDEX idx_mc_movie_id ON movie_companies(movie_id);\nCREATE INDEX idx_ci_movie_id ON cast_info(movie_id);\nCREATE INDEX idx_ci_role_id ON cast_info(role_id);\nCREATE INDEX idx_mc_company_id ON movie_companies(company_id);\n\n\n-- Step 2: Run the optimized query\nWITH actor_role AS (\n  SELECT id\n  FROM role_type\n  WHERE role = 'actor'\n),\nrussian_companies AS (\n  SELECT id\n  FROM company_name\n  WHERE country_code = '[ru]'\n)\nSELECT MIN(chn.name) AS character,\n       MIN(t.title) AS russian_mov_with_actor_producer\nFROM title AS t\nJOIN movie_companies AS mc ON t.id = mc.movie_id\nJOIN russian_companies AS rc ON mc.company_id = rc.id\nJOIN cast_info AS ci ON t.id = ci.movie_id\nJOIN actor_role AS ar ON ci.role_id = ar.id\nJOIN char_name AS chn ON chn.id = ci.person_role_id\nJOIN company_type AS ct ON ct.id = mc.company_type_id\nWHERE t.production_year > 2010\n  AND ci.note LIKE '%(producer)%';",
+  "retry_count": 0,
+  "verdict": "pass",
+  "hit_max_retry": false,
+  "error": null,
+  "timestamp": "2026-06-06T17:39:21.313356"
+}

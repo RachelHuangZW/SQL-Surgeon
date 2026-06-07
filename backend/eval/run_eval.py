@@ -96,7 +96,7 @@ def main():
             state = agent_graph.invoke({
                 "original_sql": sql,
                 "ddl": ddl,
-                "table_name": table_names[0] if table_names else "",
+                "table_name": "",
                 "retry_count": 0,
             })
 

@@ -1,0 +1,24 @@
+{
+  "query": "10a",
+  "status": "success",
+  "b1_cost": 514234.57,
+  "surgeon_cost": null,
+  "issues": [
+    "Sequential scan on 'cast_info' with a non-SARGable filter `(ci.note ~~ '%(voice)%' AND ci.note ~~ '%(uncredited)%')` reads over 12 million rows to find approximately 10,000. A GIN index using the pg_trgm extension on the 'note' column would significantly improve performance.",
+    "Significant row underestimation for the join between 'cast_info' and 'role_type' (planned: 51, actual: 8,625), leading to suboptimal plan choices.",
+    "The filter `(cn.country_code)::text = '[ru]'::text` is applied after an index scan on 'company_name', resulting in many wasted lookups. An index on 'country_code' could be beneficial.",
+    "The filter `(t.production_year > 2005)` is applied after an index scan on 'title', which is inefficient. An index on 'production_year' could improve performance if the planner reorders the joins."
+  ],
+  "advice": [
+    "Create a GIN index on `cast_info.note` using the `pg_trgm` extension to accelerate the `LIKE` filters.",
+    "Add indexes on `title(production_year)` and `company_name(country_code)` to improve filtering performance.",
+    "Rewrite the query using explicit `JOIN` syntax for better readability and to eliminate a redundant join condition.",
+    "Run `ANALYZE` on the involved tables after creating indexes to update statistics, which helps the query planner choose a more optimal execution plan."
+  ],
+  "optimized_sql": "-- Step 1: Create indexes (run once)\nCREATE EXTENSION IF NOT EXISTS pg_trgm;\n\n-- Index for LIKE filters on cast_info.note\nCREATE INDEX idx_ci_note_trgm ON cast_info USING gin (note gin_trgm_ops);\n\n-- Index for filter on company_name.country_code\nCREATE INDEX idx_cn_country_code ON company_name (country_code);\n\n-- Index for filter on title.production_year\nCREATE INDEX idx_t_production_year ON title (production_year);\n\n\n-- Step 2: Run the optimized query\nSELECT MIN(chn.name) AS uncredited_voiced_character,\n       MIN(t.title) AS russian_movie\nFROM title AS t\nJOIN cast_info AS ci ON t.id = ci.movie_id\nJOIN movie_companies AS mc ON t.id = mc.movie_id\nJOIN role_type AS rt ON ci.role_id = rt.id\nJOIN char_name AS chn ON ci.person_role_id = chn.id\nJOIN company_name AS cn ON mc.company_id = cn.id\nJOIN company_type AS ct ON mc.company_type_id = ct.id\nWHERE ci.note LIKE '%(voice)%'\n  AND ci.note LIKE '%(uncredited)%'\n  AND cn.country_code = '[ru]'\n  AND rt.role = 'actor'\n  AND t.production_year > 2005;",
+  "retry_count": 0,
+  "verdict": "pass",
+  "hit_max_retry": false,
+  "error": null,
+  "timestamp": "2026-06-06T17:38:14.531441"
+}

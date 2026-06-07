@@ -1,0 +1,23 @@
+{
+  "query": "11c",
+  "status": "success",
+  "b1_cost": 84791.37,
+  "surgeon_cost": null,
+  "issues": [
+    "Large discrepancy between estimated (42) and actual (15,801) rows for the join between 'keyword' and 'movie_keyword', leading to a suboptimal plan with nested loops. Consider running ANALYZE on the involved tables.",
+    "Sequential scan on the 'keyword' table with a filter on the 'keyword' column. An index on 'keyword(keyword)' is recommended to speed up the lookup.",
+    "Filters on 'company_name.name' and 'company_name.country_code' are applied late in the plan inside a nested loop that executes over 15,000 times, indicating a suboptimal join order.",
+    "Sequential scan on 'movie_companies' table where the filter 'mc.note IS NOT NULL' removes almost half the rows. A partial index could be beneficial if this is a common query pattern."
+  ],
+  "advice": [
+    "Create indexes on key filtering and join columns, such as `keyword.keyword`, `company_name.name`, and foreign keys like `movie_keyword.keyword_id` and `movie_companies.company_id`.",
+    "Run `ANALYZE` on all involved tables to update statistics. This will correct the planner's poor row estimates and lead to a better join order and method selection.",
+    "Rewrite the query using explicit ANSI `JOIN` syntax. This separates join logic from `WHERE` clause filters, improving readability and removing redundant conditions."
+  ],
+  "optimized_sql": "-- Step 1: Create index (run once)\n-- These indexes support the most selective filters and critical join conditions.\nCREATE INDEX idx_keyword_keyword ON keyword(keyword);\nCREATE INDEX idx_company_name_name ON company_name(name);\nCREATE INDEX idx_title_production_year ON title(production_year);\nCREATE INDEX idx_movie_keyword_keyword_id ON movie_keyword(keyword_id);\nCREATE INDEX idx_movie_companies_company_id ON movie_companies(company_id);\nCREATE INDEX idx_movie_companies_movie_id ON movie_companies(movie_id);\n\n\n-- Step 2: Run the optimized query\n-- This version uses modern, explicit JOINs for clarity and removes redundant join conditions.\nSELECT MIN(cn.name) AS from_company,\n       MIN(mc.note) AS production_note,\n       MIN(t.title) AS movie_based_on_book\nFROM keyword AS k\nJOIN movie_keyword AS mk ON k.id = mk.keyword_id\nJOIN title AS t ON t.id = mk.movie_id\nJOIN movie_companies AS mc ON t.id = mc.movie_id\nJOIN company_name AS cn ON mc.company_id = cn.id\nJOIN company_type AS ct ON mc.company_type_id = ct.id\nJOIN movie_link AS ml ON t.id = ml.movie_id\nJOIN link_type AS lt ON ml.link_type_id = lt.id\nWHERE k.keyword IN ('sequel',\n                    'revenge',\n                    'based-on-novel')\n  AND t.production_year > 1950\n  AND mc.note IS NOT NULL\n  AND (cn.name LIKE '20th Century Fox%'\n       OR cn.name LIKE 'Twentieth Century Fox%')\n  AND cn.country_code != '[pl]'\n  AND ct.kind != 'production companies'\n  AND ct.kind IS NOT NULL;",
+  "retry_count": 0,
+  "verdict": "pass",
+  "hit_max_retry": false,
+  "error": null,
+  "timestamp": "2026-06-06T17:46:02.055718"
+}

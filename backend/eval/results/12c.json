@@ -1,0 +1,26 @@
+{
+  "query": "12c",
+  "status": "success",
+  "b1_cost": 304424.46,
+  "surgeon_cost": null,
+  "issues": [
+    "Large discrepancy between estimated (6,125) and actual (444,961) rows in the Hash Join between `movie_companies` and `company_type`, indicating stale statistics.",
+    "Sequential scan on `movie_info` with a highly selective filter `(mi.info = ANY (...))` that removes over 4.8 million rows per loop. An index on `(info_type_id, info)` is recommended.",
+    "Sequential scan on `movie_info_idx` with a selective filter `(mi_idx.info > '7.0'::text)` that removes over 395,000 rows per loop. An index on `(info_type_id, info)` is recommended.",
+    "Inefficient filter on `company_name.country_code` applied after an index scan inside a nested loop that executes over 38,000 times. An index on `company_name(country_code)` is recommended."
+  ],
+  "advice": [
+    "Update table statistics using `ANALYZE` to improve query planner cost estimations, particularly for `movie_companies` and `company_type`.",
+    "Create a composite index on `movie_info(info_type_id, info)` to accelerate filtering by genre.",
+    "Create a composite index on `movie_info_idx(info_type_id, info)` to speed up lookups for movie ratings.",
+    "Create an index on `company_name(country_code)` to efficiently filter companies by country.",
+    "Create an index on `title(production_year)` to optimize the production year range filter.",
+    "Rewrite the query using modern explicit `JOIN` syntax for better readability and to remove redundant join conditions."
+  ],
+  "optimized_sql": "-- Step 1: Create index (run once)\nCREATE INDEX idx_company_name_country_code ON company_name(country_code);\nCREATE INDEX idx_title_production_year ON title(production_year);\nCREATE INDEX idx_movie_info_info_type_id_info ON movie_info(info_type_id, info);\nCREATE INDEX idx_movie_info_idx_info_type_id_info ON movie_info_idx(info_type_id, info);\n\n-- Step 2: Run the optimized query\nSELECT MIN(cn.name) AS movie_company,\n       MIN(mi_idx.info) AS rating,\n       MIN(t.title) AS mainstream_movie\nFROM title AS t\nJOIN movie_info AS mi ON t.id = mi.movie_id\nJOIN info_type AS it1 ON mi.info_type_id = it1.id\nJOIN movie_info_idx AS mi_idx ON t.id = mi_idx.movie_id\nJOIN info_type AS it2 ON mi_idx.info_type_id = it2.id\nJOIN movie_companies AS mc ON t.id = mc.movie_id\nJOIN company_name AS cn ON mc.company_id = cn.id\nJOIN company_type AS ct ON mc.company_type_id = ct.id\nWHERE cn.country_code = '[us]'\n  AND ct.kind = 'production companies'\n  AND it1.info = 'genres'\n  AND it2.info = 'rating'\n  AND mi.info IN ('Drama',\n                  'Horror',\n                  'Western',\n                  'Family')\n  AND mi_idx.info > '7.0'\n  AND t.production_year BETWEEN 2000 AND 2010;",
+  "retry_count": 2,
+  "verdict": "retry",
+  "hit_max_retry": true,
+  "error": null,
+  "timestamp": "2026-06-06T17:52:27.679195"
+}

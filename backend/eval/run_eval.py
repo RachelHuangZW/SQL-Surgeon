@@ -60,8 +60,6 @@ def evaluate_with_hypopg(conn, sql: str, index_ddls: list) -> float:
     return total_cost
 
 
-
-
 def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
 

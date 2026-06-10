@@ -14,8 +14,6 @@ SQL Surgeon is built as a **LangGraph state machine**, not a simple LLM chain. T
 run_explain → identify_issues → generate_advice → review_advice
                     ↑                                    |
                     └──────────── retry (max 2) ─────────┘
-                                                         |  pass
-                                              benchmark (optional)
                                                          |
                                                         END
 ```
@@ -28,9 +26,62 @@ run_explain → identify_issues → generate_advice → review_advice
 | `identify_issues` | LLM reads the execution plan + DDL, returns a list of specific bottlenecks |
 | `generate_advice` | LLM produces concrete recommendations + a two-step executable script (CREATE INDEX + optimized query) |
 | `review_advice` | LLM acts as a senior DBA reviewer — returns `pass` or `retry` with feedback |
-| `generate_benchmark` | (Optional) Runs the original and optimized query in a sandboxed schema to measure actual improvement |
 
 If `review_advice` returns `retry`, the feedback is fed back into `identify_issues` and the loop runs again (max 2 retries).
+
+---
+
+## Evaluation Framework
+
+SQL Surgeon includes a rigorous evaluation harness benchmarked on the **Join Order Benchmark (JOB)** — 113 real-world analytical queries over the IMDb dataset (~36M rows in `cast_info` alone).
+
+### Metrics (L1–L3)
+
+| Metric | What it measures |
+|--------|-----------------|
+| **L1** — Execution cost | PostgreSQL planner cost before vs. after surgeon's suggested indexes (via hypopg) |
+| **L2** — Structural quality | Precision/recall of surgeon's index recommendations vs. oracle greedy search |
+| **L3** — Agent health | `retry_count`, `verdict`, `hit_max_retry` — internal loop behavior |
+
+### Baselines (B1–B2)
+
+| Baseline | Description |
+|----------|-------------|
+| **B1** | Raw query cost with no indexes — `EXPLAIN (FORMAT JSON)` on the original SQL |
+| **B2** | Oracle greedy search — hypothetically adds indexes one by one (via hypopg), each round picking the column that drops cost the most |
+
+**L × B matrix:** B1 is the floor, B2 is the theoretical ceiling under PostgreSQL's cost model. SQL Surgeon is evaluated against both.
+
+### hypopg
+
+Evaluation uses [hypopg](https://hypopg.readthedocs.io/) — a PostgreSQL extension that registers indexes in memory without building them. This lets us measure the planner cost improvement of suggested indexes in milliseconds, without touching the real database.
+
+### Running the eval
+
+```bash
+# Requires: Docker container postgres-job-docker-job-1 running with IMDb data
+cd backend
+python -m eval.run_eval
+```
+
+Each query produces a JSON result in `eval/results/`:
+
+```json
+{
+  "query": "10a",
+  "status": "success",
+  "b1_cost": 514234.57,
+  "surgeon_cost": 89123.4,
+  "b2_cost": 71200.1,
+  "b2_indexes": ["CREATE INDEX ON title(production_year)", "..."],
+  "issues": [...],
+  "advice": [...],
+  "optimized_sql": "...",
+  "retry_count": 0,
+  "verdict": "pass",
+  "hit_max_retry": false
+}
+```
 
 ---
 
@@ -41,7 +92,9 @@ If `review_advice` returns `retry`, the feedback is fed back into `identify_issu
 | Agent orchestration | LangGraph + LangChain |
 | LLM | Google Gemini 2.5 Pro |
 | Backend API | FastAPI + Uvicorn |
-| Database | PostgreSQL (via psycopg2) |
+| Database | PostgreSQL 16 (via psycopg2) |
+| Hypothetical indexes | hypopg |
+| Evaluation dataset | Join Order Benchmark (JOB) over IMDb |
 | Frontend | Next.js 14 (App Router) + Tailwind CSS |
 
 ---
@@ -54,12 +107,15 @@ SQL-Surgeon/
 │   ├── agent/
 │   │   ├── state.py        # AgentState TypedDict (shared blackboard)
 │   │   ├── prompts.py      # ANALYSIS, ADVICE, REVIEW_ADVICE prompts
-│   │   ├── nodes.py        # All 5 graph node functions
+│   │   ├── nodes.py        # All graph node functions
 │   │   └── graph.py        # LangGraph StateGraph definition + routing logic
 │   ├── api/
 │   │   └── main.py         # FastAPI app, /api/diagnose endpoint
 │   ├── db/
 │   │   └── client.py       # DBClient: execute_explain + benchmark_in_sandbox
+│   ├── eval/
+│   │   ├── run_eval.py     # Eval harness: L1/L2/L3 metrics, B1/B2 baselines, hypopg
+│   │   └── results/        # Per-query JSON results + summary
 │   └── test_agent.py       # End-to-end test (bypasses API)
 ├── frontend/
 │   ├── app/
@@ -70,6 +126,8 @@ SQL-Surgeon/
 │   │   └── ResultPanel.tsx # Issues, advice, optimized SQL with copy button
 │   └── lib/
 │       └── api.ts          # fetch wrapper for /api/diagnose
+├── postgres-job-docker/    # Docker setup for JOB benchmark database
+│   └── Dockerfile          # PostgreSQL 16 + hypopg
 ├── requirements.txt
 └── .env                    # DATABASE_URL + GOOGLE_API_KEY (not committed)
 ```
@@ -146,7 +204,6 @@ Open [http://localhost:3000](http://localhost:3000), paste your slow query + DDL
   "advice": ["Create a composite index on (status, created_at DESC)", "..."],
   "optimized_sql": "-- Step 1: Create index (run once)\nCREATE INDEX ...\n\n-- Step 2: Run the optimized query\nSELECT ...",
   "explain_output": [...],
-  "benchmark_result": null,
   "error": null
 }
 ```

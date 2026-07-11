@@ -46,6 +46,11 @@ def get_explain_cost(conn, sql: str) -> float:
     return total_cost
 
 
+def extract_index_ddls(optimized_sql: str) -> list:
+    # Pull out every CREATE INDEX ... ; statement from the surgeon's output
+    return re.findall(r'(CREATE INDEX[^;]+;)', optimized_sql, re.IGNORECASE)
+
+
 def evaluate_with_hypopg(conn, sql: str, index_ddls: list) -> float:
     with conn.cursor() as cur:
         # First clean last hypopg execution
@@ -98,17 +103,24 @@ def main():
                 "retry_count": 0,
             })
 
+            surgeon_cost = None
+            optimized_sql = state.get("optimized_sql") 
+            if optimized_sql:
+                extract_index_ddl = extract_index_ddls(state.get("optimized_sql"))
+                if extract_index_ddl:
+                    surgeon_cost = evaluate_with_hypopg(conn, sql, extract_index_ddl)
+
             result = {
                 "query": query_name,
                 "status": "error" if state.get("error") else "success",
                 # L1 execution cost
                 "b1_cost": b1_cost,
                 # Surgeon execution cost
-                "surgeon_cost": None,
+                "surgeon_cost": surgeon_cost,
                 # Agent output
                 "issues": state.get("issues"),
                 "advice": state.get("advice"),
-                "optimized_sql": state.get("optimized_sql"),
+                "optimized_sql": optimized_sql,
                 # L3 internal health
                 "retry_count": state.get("retry_count"),
                 "verdict": state.get("verdict"),

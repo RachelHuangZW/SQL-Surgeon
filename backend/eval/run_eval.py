@@ -107,7 +107,7 @@ def get_gin_candidate_columns(conn, table_names: list) -> list:
     return candidates
 
 
-def greedy_oracle_b2_gin(conn, sql: str, table_names: list) -> tuple:
+def oracle_greedy_gin(conn, sql: str, table_names: list) -> tuple:
     # Returns (b2_gin_cost, b2_gin_indexes)
     # Greedy search using real GIN indexes — slow but accurate.
     # Selected indexes stay on DB across rounds so EXPLAIN sees their combined effect.
@@ -172,7 +172,7 @@ def greedy_oracle_b2_gin(conn, sql: str, table_names: list) -> tuple:
     return current_cost, selected_ddls
 
 
-def greedy_oracle_b2(conn, sql: str, table_names: list) -> tuple:
+def oracle_greedy_btree(conn, sql: str, table_names: list) -> tuple:
     # Returns (b2_btree_cost, b2_btree_indexes)
     candidates = get_candidate_columns(conn, table_names)
     selected_ddl = []
@@ -198,7 +198,7 @@ def greedy_oracle_b2(conn, sql: str, table_names: list) -> tuple:
     return current_cost, selected_ddl
 
 
-def eval_gin_adoption(conn, sql: str, gin_ddls: list) -> tuple:
+def eval_surgeon_gin(conn, sql: str, gin_ddls: list) -> tuple:
     # Returns (gin_cost, adopted_indexes)
     # gin_cost: planner Total Cost with real GIN indexes applied (parallel to surgeon_btree_cost)
     # adopted_indexes: list of index names the planner actually chose to use
@@ -238,6 +238,118 @@ def eval_gin_adoption(conn, sql: str, gin_ddls: list) -> tuple:
     return gin_cost, adopted
 
 
+def oracle_greedy_combined(conn, sql: str, table_names: list) -> tuple:
+    # Returns (b2_combined_cost, btree_ddls, gin_ddls)
+    # Each round picks the best index across both btree AND GIN candidates.
+    # Committed btree: kept as hypopg hypotheticals (re-passed each eval).
+    # Committed GIN: kept as real indexes on DB so planner sees them during hypopg EXPLAIN.
+    # All real GIN indexes are dropped in finally.
+    try:
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+            conn.commit()
+    except Exception:
+        conn.rollback()
+
+    btree_candidates = get_candidate_columns(conn, table_names)
+    gin_candidates = get_gin_candidate_columns(conn, table_names)
+    selected_btree_ddls = []
+    selected_gin_ddls = []
+    selected_gin_names = []
+    current_cost = get_explain_cost(conn, sql)
+
+    try:
+        while btree_candidates or gin_candidates:
+            best_cost = current_cost
+            best_candidate = None
+
+            for table, col in btree_candidates:
+                ddl = f"CREATE INDEX ON {table}({col});"
+                cost = evaluate_with_hypopg(conn, sql, selected_btree_ddls + [ddl])
+                if cost < best_cost:
+                    best_cost = cost
+                    best_candidate = ('btree', table, col, ddl)
+
+            for table, col in gin_candidates:
+                idx_name = f"_b2comb_{table}_{col}"
+                ddl = f"CREATE INDEX {idx_name} ON {table} USING gin ({col} gin_trgm_ops);"
+                created = False
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(ddl)
+                        conn.commit()
+                    created = True
+                    # Real GIN is on DB; hypopg sees it alongside the btree hypotheticals
+                    cost = evaluate_with_hypopg(conn, sql, selected_btree_ddls)
+                    if cost < best_cost:
+                        best_cost = cost
+                        best_candidate = ('gin', table, col, idx_name, ddl)
+                except Exception:
+                    conn.rollback()
+                finally:
+                    if created:
+                        with conn.cursor() as cur:
+                            cur.execute(f"DROP INDEX IF EXISTS {idx_name}")
+                            conn.commit()
+
+            if best_candidate is None:
+                break
+
+            if best_candidate[0] == 'btree':
+                _, table, col, ddl = best_candidate
+                selected_btree_ddls.append(ddl)
+                btree_candidates.remove((table, col))
+            else:
+                _, table, col, idx_name, ddl = best_candidate
+                with conn.cursor() as cur:
+                    cur.execute(ddl)
+                    conn.commit()
+                selected_gin_ddls.append(ddl)
+                selected_gin_names.append(idx_name)
+                gin_candidates.remove((table, col))
+
+            current_cost = best_cost
+
+    finally:
+        with conn.cursor() as cur:
+            for name in selected_gin_names:
+                cur.execute(f"DROP INDEX IF EXISTS {name}")
+            conn.commit()
+
+    return current_cost, selected_btree_ddls, selected_gin_ddls
+
+
+def evaluate_surgeon_combined(conn, sql: str, btree_ddls: list, gin_ddls: list) -> float:
+    # Returns cost with surgeon's real GIN indexes on DB + btree as hypopg hypotheticals.
+    created_gin = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+            conn.commit()
+    except Exception:
+        conn.rollback()
+    try:
+        for ddl in gin_ddls:
+            match = re.search(r'CREATE INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+(\w+)', ddl, re.IGNORECASE)
+            if not match:
+                continue
+            idx_name = match.group(1)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(ddl)
+                    conn.commit()
+                created_gin.append(idx_name)
+            except Exception:
+                conn.rollback()
+        cost = evaluate_with_hypopg(conn, sql, btree_ddls)
+    finally:
+        with conn.cursor() as cur:
+            for name in created_gin:
+                cur.execute(f"DROP INDEX IF EXISTS {name}")
+            conn.commit()
+    return cost
+
+
 def main():
     os.makedirs(RESULTS_DIR, exist_ok=True)
 
@@ -250,6 +362,7 @@ def main():
     if not sql_files:
         print(f"No .sql files found in {QUERY_DIR}")
         return
+    sql_files = sql_files[:1]  # TODO: remove after testing
     print(f"Found {len(sql_files)} queries to evaluate")
 
     conn = psycopg2.connect(dsn)
@@ -268,8 +381,9 @@ def main():
 
         try:
             b1_cost = get_explain_cost(conn, sql)
-            b2_btree_cost, b2_btree_indexes = greedy_oracle_b2(conn, sql, table_names)
-            b2_gin_cost, b2_gin_indexes = greedy_oracle_b2_gin(conn, sql, table_names)
+            b2_btree_cost, b2_btree_indexes = oracle_greedy_btree(conn, sql, table_names)
+            b2_gin_cost, b2_gin_indexes = oracle_greedy_gin(conn, sql, table_names)
+            b2_combined_cost, b2_combined_btree_indexes, b2_combined_gin_indexes = oracle_greedy_combined(conn, sql, table_names)
             state = agent_graph.invoke({
                 "original_sql": sql,
                 "ddl": ddl,
@@ -279,6 +393,7 @@ def main():
 
             surgeon_btree_cost = None
             surgeon_gin_cost = None
+            surgeon_combined_cost = None
             surgeon_gin_indexes = []
             surgeon_gin_adopted = []
             optimized_sql = state.get("optimized_sql")
@@ -288,21 +403,27 @@ def main():
                 if btree_ddls:
                     surgeon_btree_cost = evaluate_with_hypopg(conn, sql, btree_ddls)
                 if gin_ddls:
-                    surgeon_gin_cost, surgeon_gin_adopted = eval_gin_adoption(conn, sql, gin_ddls)
+                    surgeon_gin_cost, surgeon_gin_adopted = eval_surgeon_gin(conn, sql, gin_ddls)
+                if btree_ddls or gin_ddls:
+                    surgeon_combined_cost = evaluate_surgeon_combined(conn, sql, btree_ddls, gin_ddls)
 
             result = {
                 "query": query_name,
                 "status": "error" if state.get("error") else "success",
                 # L1 execution cost
                 "b1_cost": b1_cost,
-                # B2 Oracle evaluation cost 
+                # B2 Oracle evaluation cost
                 "b2_btree_cost": b2_btree_cost,
                 "b2_btree_indexes": b2_btree_indexes,
                 "b2_gin_cost": b2_gin_cost,
                 "b2_gin_indexes": b2_gin_indexes,
-                # Surgeon execution cost (btree only; GIN excluded due to hypopg limitation)
+                "b2_combined_cost": b2_combined_cost,
+                "b2_combined_btree_indexes": b2_combined_btree_indexes,
+                "b2_combined_gin_indexes": b2_combined_gin_indexes,
+                # Surgeon evaluation cost
                 "surgeon_btree_cost": surgeon_btree_cost,
                 "surgeon_gin_cost": surgeon_gin_cost,
+                "surgeon_combined_cost": surgeon_combined_cost,
                 "surgeon_gin_indexes": surgeon_gin_indexes,
                 # Agent output
                 "issues": state.get("issues"),

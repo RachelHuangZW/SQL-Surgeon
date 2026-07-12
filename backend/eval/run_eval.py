@@ -238,6 +238,38 @@ def eval_surgeon_gin(conn, sql: str, gin_ddls: list) -> tuple:
     return gin_cost, adopted
 
 
+def extract_index_columns(ddls: list) -> set:
+    # Parses CREATE INDEX DDL strings into (table, column) pairs for set comparison.
+    # Handles: CREATE INDEX ON t(col), CREATE INDEX name ON t (col), USING gin (col ops)
+    result = set()
+    for ddl in ddls:
+        match = re.search(r'\bON\s+(\w+)\s+(?:USING\s+\w+\s+)?\((\w+)', ddl, re.IGNORECASE)
+        if match:
+            result.add((match.group(1).lower(), match.group(2).lower()))
+    return result
+
+
+def compute_l2_metrics(surgeon_ddls: list, oracle_ddls: list) -> dict:
+    # Returns precision, recall, f1, and matched columns for L2 index quality evaluation.
+    surgeon_set = extract_index_columns(surgeon_ddls)
+    oracle_set  = extract_index_columns(oracle_ddls)
+
+    if not surgeon_set and not oracle_set:
+        return {"precision": None, "recall": None, "f1": None, "matched": []}
+
+    intersection = surgeon_set & oracle_set
+    precision = len(intersection) / len(surgeon_set) if surgeon_set else 0.0
+    recall    = len(intersection) / len(oracle_set)  if oracle_set  else 0.0
+    f1        = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+
+    return {
+        "precision": round(precision, 3),
+        "recall":    round(recall, 3),
+        "f1":        round(f1, 3),
+        "matched":   sorted(intersection),
+    }
+
+
 def oracle_greedy_combined(conn, sql: str, table_names: list) -> tuple:
     # Returns (b2_combined_cost, btree_ddls, gin_ddls)
     # Each round picks the best index across both btree AND GIN candidates.
@@ -396,6 +428,9 @@ def main():
             surgeon_combined_cost = None
             surgeon_gin_indexes = []
             surgeon_gin_adopted = []
+            l2_btree = {}
+            l2_combined = {}
+            btree_ddls, gin_ddls = [], []
             optimized_sql = state.get("optimized_sql")
             if optimized_sql:
                 btree_ddls, gin_ddls = extract_index_ddls(optimized_sql)
@@ -406,6 +441,8 @@ def main():
                     surgeon_gin_cost, surgeon_gin_adopted = eval_surgeon_gin(conn, sql, gin_ddls)
                 if btree_ddls or gin_ddls:
                     surgeon_combined_cost = evaluate_surgeon_combined(conn, sql, btree_ddls, gin_ddls)
+                l2_btree    = compute_l2_metrics(btree_ddls, b2_btree_indexes)
+                l2_combined = compute_l2_metrics(btree_ddls + gin_ddls, b2_combined_btree_indexes + b2_combined_gin_indexes)
 
             result = {
                 "query": query_name,
@@ -425,6 +462,9 @@ def main():
                 "surgeon_gin_cost": surgeon_gin_cost,
                 "surgeon_combined_cost": surgeon_combined_cost,
                 "surgeon_gin_indexes": surgeon_gin_indexes,
+                # L2 index quality
+                "l2_btree": l2_btree,
+                "l2_combined": l2_combined,
                 # Agent output
                 "issues": state.get("issues"),
                 "advice": state.get("advice"),

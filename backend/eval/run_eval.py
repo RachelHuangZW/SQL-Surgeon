@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import re
+import signal
 import psycopg2
 from glob import glob
 from datetime import datetime
@@ -243,7 +244,7 @@ def extract_index_columns(ddls: list) -> set:
     # Handles: CREATE INDEX ON t(col), CREATE INDEX name ON t (col), USING gin (col ops)
     result = set()
     for ddl in ddls:
-        match = re.search(r'\bON\s+(\w+)\s+(?:USING\s+\w+\s+)?\((\w+)', ddl, re.IGNORECASE)
+        match = re.search(r'\bON\s+(\w+)\s*(?:USING\s+\w+\s+)?\((\w+)', ddl, re.IGNORECASE)
         if match:
             result.add((match.group(1).lower(), match.group(2).lower()))
     return result
@@ -398,6 +399,16 @@ def main():
     print(f"Found {len(sql_files)} queries to evaluate")
 
     conn = psycopg2.connect(dsn)
+    with conn.cursor() as cur:
+        cur.execute("SET statement_timeout = '10min'")
+
+    def _timeout_handler(signum, frame):
+        try:
+            conn.cancel()
+        except Exception:
+            pass
+        raise TimeoutError("Query exceeded 20-minute limit")
+
     results = []
 
     for i, filepath in enumerate(sql_files):
@@ -411,6 +422,8 @@ def main():
         ddl_parts = [fetch_ddl(conn, t) for t in table_names]
         ddl = "\n".join(filter(None, ddl_parts))
 
+        signal.signal(signal.SIGALRM, _timeout_handler)
+        signal.alarm(20 * 60)
         try:
             b1_cost = get_explain_cost(conn, sql)
             b2_btree_cost, b2_btree_indexes = oracle_greedy_btree(conn, sql, table_names)
@@ -476,6 +489,17 @@ def main():
                 "error": state.get("error"),
                 "timestamp": datetime.now().isoformat(),
             }
+        except TimeoutError as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            result = {
+                "query": query_name,
+                "status": "timeout",
+                "error": str(e),
+                "timestamp": datetime.now().isoformat(),
+            }
         except Exception as e:
             result = {
                 "query": query_name,
@@ -483,6 +507,8 @@ def main():
                 "error": str(e),
                 "timestamp": datetime.now().isoformat(),
             }
+        finally:
+            signal.alarm(0)
 
         results.append(result)
 

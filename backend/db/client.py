@@ -9,6 +9,8 @@ class DBClient:
     
     def execute_explain(self, sql: str):
         conn = psycopg2.connect(self.dsn)
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '120s'") # Set timeout for EXPLAIN ANALYZE
         cursor = conn.cursor(cursor_factory=RealDictCursor)
 
         try:
@@ -33,6 +35,8 @@ class DBClient:
     
     def benchmark_in_sandbox(self, table_name: str, original_sql: str, suggested_ddl: str):
         conn = psycopg2.connect(self.dsn)
+        with conn.cursor() as cur:
+            cur.execute("SET statement_timeout = '300s'") # Set timeout for DDL + EXPLAIN ANALYZE
         cursor = conn.cursor(cursor_factory=RealDictCursor)
         schema_name = f"surgeon_tmp_{int(time.time())}"
 

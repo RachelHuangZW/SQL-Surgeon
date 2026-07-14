@@ -18,6 +18,7 @@ llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-pro",
     google_api_key=api_key,
     temperature=0.1,
+    timeout=60
 )
 
 def strip_code_block(text: str) -> str:
@@ -26,6 +27,29 @@ def strip_code_block(text: str) -> str:
         text = text.split("\n", 1)[-1]
         text = text.rsplit("```", 1)[0]
     return text.strip()
+
+
+EXTENSION_DEPS = {
+    r'\bgin_trgm_ops\b': "CREATE EXTENSION IF NOT EXISTS pg_trgm;",
+    r'\bbtree_gin\b':    "CREATE EXTENSION IF NOT EXISTS btree_gin;",
+}
+
+
+def inject_extension_deps(optimized_sql: str) -> str:
+    needed = []
+    for patter, stmt in EXTENSION_DEPS.items():
+        if re.search(pattern, optimized_sql, re.IGNORECASE):
+            if stmt.lower() not in optimized_sql.lower():
+                needed.append(stmt )
+    if not needed:
+        return optimized_sql
+    marker = "-- Step 1:"
+    idx = optimized_sql.find(marker)
+    if idx != -1:
+        line_end = optimized_sql.find("\n", idx) + 1
+        return optimized_sql[:line_end] + "\n".join(needed) + "\n" + optimized_sql[line_end:]
+
+    return "\n".join(needed) + "\n" + optimized_sql
 
 
 def run_explain_node(state: AgentState):
@@ -94,7 +118,7 @@ def generate_advice(state: AgentState):
         result = json.loads(strip_code_block(response.content))
         return {
             "advice": result["advice"],
-            "optimized_sql": result["optimized_sql"]
+            "optimized_sql": inject_extension_deps(result["optimized_sql"])
         }
     except (json.JSONDecodeError, KeyError) as e:
         return {"error": f"LLM returned unparseable response: {response.content}"}

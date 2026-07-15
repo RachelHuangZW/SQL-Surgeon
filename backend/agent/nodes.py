@@ -4,6 +4,7 @@ from agent.prompts import ANALYSIS_PROMPT
 from agent.prompts import ADVICE_PROMPT
 from agent.prompts import REVIEW_ADVICE_PROMPT
 
+import re
 import json
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -160,18 +161,18 @@ def generate_benchmark_schema(state: AgentState):
     dsn = os.getenv("DATABASE_URL")
     if not dsn:
         return {"error": "DATABASE_URL not set"}
-    
+
     db_client = DBClient(dsn)
 
+    original_sql = state.get("original_sql")
     if not state.get("optimized_sql"):
         return {"error": "No optimized SQL to benchmark"}
 
-    table_name = state.get("table_name")
-    original_sql = state.get("original_sql")
+    table_names = list(set(re.findall(r'(?:FROM|JOIN|,)\s+([a-zA-Z_][a-zA-Z0-9_]*)', original_sql, re.IGNORECASE)))
     suggested_ddl = state.get("optimized_sql")
 
     try:
-        new_plan = db_client.benchmark_in_sandbox(table_name, original_sql, suggested_ddl)
+        new_plan = db_client.benchmark_in_sandbox(table_names, original_sql, suggested_ddl)
         return {
             "benchmark_result": new_plan
         }

@@ -33,7 +33,7 @@ class DBClient:
             conn.close()
 
     
-    def benchmark_in_sandbox(self, table_name: str, original_sql: str, suggested_ddl: str):
+    def benchmark_in_sandbox(self, table_names: list, original_sql: str, suggested_ddl: str):
         conn = psycopg2.connect(self.dsn)
         with conn.cursor() as cur:
             cur.execute("SET statement_timeout = '300s'") # Set timeout for DDL + EXPLAIN ANALYZE
@@ -42,8 +42,10 @@ class DBClient:
 
         try:
             cursor.execute(f"CREATE SCHEMA {schema_name};")
-            cursor.execute(f"CREATE TABLE {schema_name}.{table_name} (LIKE public.{table_name} INCLUDING ALL);")
-            cursor.execute(f"INSERT INTO {schema_name}.{table_name} SELECT * FROM public.{table_name} LIMIT 100000;")
+            for table in table_names:
+                cursor.execute(f"CREATE TABLE {schema_name}.{table} (LIKE public.{table} INCLUDING DEFAULTS INCLUDING INDEXES);")
+                cursor.execute(f"INSERT INTO {schema_name}.{table} SELECT * FROM public.{table} LIMIT 100000;")
+            
             cursor.execute(f"SET search_path TO {schema_name};")
 
             if suggested_ddl:

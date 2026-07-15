@@ -38,10 +38,10 @@ EXTENSION_DEPS = {
 
 def inject_extension_deps(optimized_sql: str) -> str:
     needed = []
-    for patter, stmt in EXTENSION_DEPS.items():
+    for pattern, stmt in EXTENSION_DEPS.items():
         if re.search(pattern, optimized_sql, re.IGNORECASE):
             if stmt.lower() not in optimized_sql.lower():
-                needed.append(stmt )
+                needed.append(stmt)
     if not needed:
         return optimized_sql
     marker = "-- Step 1:"

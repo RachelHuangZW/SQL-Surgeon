@@ -422,6 +422,11 @@ def main():
         ddl_parts = [fetch_ddl(conn, t) for t in table_names]
         ddl = "\n".join(filter(None, ddl_parts))
 
+        out_path = os.path.join(RESULTS_DIR, f"{query_name}.json")
+        if os.path.exists(out_path):
+            print(f"[{i+1}/{len(sql_files)}] Skip {query_name} (already done)")
+            continue
+
         signal.signal(signal.SIGALRM, _timeout_handler)
         signal.alarm(20 * 60)
         try:

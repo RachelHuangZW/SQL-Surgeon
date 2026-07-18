@@ -13,6 +13,8 @@ class AgentState(TypedDict):
     feedback: Optional[str]
     retry_count: int
     error: Optional[str]
+    total_input_tokens: Optional[int]
+    total_output_tokens: Optional[int]
 
 
 

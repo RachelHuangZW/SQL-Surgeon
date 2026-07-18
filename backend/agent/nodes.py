@@ -93,10 +93,17 @@ def identify_issues(state: AgentState):
         "execution_plan": state.get("explain_output"),
         "feedback": state.get("feedback") or "None"
     })
+
+    usage = getattr(response, 'usage_metadata', None) or {}
+    _in  = usage.get('input_tokens', 0)
+    _out = usage.get('output_tokens', 0)
     
     try:
         issues = json.loads(strip_code_block(response.content))
-        return {"issues": issues}
+        return {"issues": issues,
+                "total_input_tokens":  (state.get("total_input_tokens")  or 0) + _in,
+                "total_output_tokens": (state.get("total_output_tokens") or 0) + _out
+            }
     except json.JSONDecodeError:
         return {"error": f"LLM returned unparseable response: {response.content}"}
 
@@ -116,11 +123,17 @@ def generate_advice(state: AgentState):
         "feedback": state.get("feedback") or "None"
     })
 
+    usage = getattr(response, 'usage_metadata', None) or {}
+    _in  = usage.get('input_tokens', 0)
+    _out = usage.get('output_tokens', 0)
+
     try:
         result = json.loads(strip_code_block(response.content))
         return {
             "advice": result["advice"],
-            "optimized_sql": inject_extension_deps(result["optimized_sql"])
+            "optimized_sql": inject_extension_deps(result["optimized_sql"]),
+            "total_input_tokens":  (state.get("total_input_tokens")  or 0) + _in,
+            "total_output_tokens": (state.get("total_output_tokens") or 0) + _out
         }
     except (json.JSONDecodeError, KeyError) as e:
         return {"error": f"LLM returned unparseable response: {response.content}"}
@@ -141,6 +154,10 @@ def review_advice(state: AgentState):
         "issues": state.get("issues")
     })
 
+    usage = getattr(response, 'usage_metadata', None) or {}
+    _in  = usage.get('input_tokens', 0)
+    _out = usage.get('output_tokens', 0)
+
     try:
         result = json.loads(strip_code_block(response.content))
         new_retry_count = (state.get("retry_count") or 0)
@@ -151,7 +168,9 @@ def review_advice(state: AgentState):
         return {
             "verdict": result["verdict"],
             "feedback": result["feedback"],
-            "retry_count": new_retry_count
+            "retry_count": new_retry_count,
+            "total_input_tokens":  (state.get("total_input_tokens")  or 0) + _in,
+            "total_output_tokens": (state.get("total_output_tokens") or 0) + _out
         }
     except (json.JSONDecodeError, KeyError) as e:
         return {"error": f"LLM returned unparseable response: {response.content}"}

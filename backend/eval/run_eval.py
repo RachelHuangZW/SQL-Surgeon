@@ -30,6 +30,22 @@ try:
 except Exception:
     GIT_COMMIT = "unknown"
 
+PASS_REDUCTION_THRESHOLD = 0.10  # surgeon must reduce planner cost by at least 10%
+PASS_F1_THRESHOLD = 0.50         # surgeon's index set must score at least F1=0.5 vs oracle
+
+
+def _compute_score(b1, s_comb, l2_combined, error) -> int:
+    if error:
+        return 0
+    if not (b1 and s_comb and b1 > 0):
+        return 0
+    if (b1 - s_comb) / b1 < PASS_REDUCTION_THRESHOLD:
+        return 0
+    f1 = (l2_combined or {}).get("f1")
+    if f1 is None or f1 < PASS_F1_THRESHOLD:
+        return 0
+    return 1
+
 
 def get_table_names(sql: str) -> list:
     # Match tables after FROM, JOIN, or comma (handles implicit join syntax)
@@ -409,7 +425,7 @@ def main():
     if not sql_files:
         print(f"No .sql files found in {QUERY_DIR}")
         return
-    sql_files = sql_files[:1]  # TODO: remove after testing
+    sql_files = sql_files[:30]
 
     RUN_RESULTS_DIR = os.path.join(RESULTS_DIR, RUN_ID)
     os.makedirs(RUN_RESULTS_DIR, exist_ok=True)
@@ -486,13 +502,16 @@ def main():
             _, peak = tracemalloc.get_traced_memory()
             tracemalloc.stop()
 
+            agent_error = state.get("error")
             result = {
                 "query": query_name,
                 "run_id": RUN_ID,
                 "git_commit": GIT_COMMIT,
+                "input": sql,
                 "elapsed_seconds": elapsed,
                 "peak_memory_mb": round(peak / 1024 / 1024, 1),
-                "status": "error" if state.get("error") else "success",
+                "status": "error" if agent_error else "success",
+                "score": _compute_score(b1_cost, surgeon_combined_cost, l2_combined, agent_error),
                 # L1 execution cost
                 "b1_cost": b1_cost,
                 # B2 Oracle evaluation cost
@@ -518,8 +537,10 @@ def main():
                 # L3 internal health
                 "retry_count": state.get("retry_count"),
                 "verdict": state.get("verdict"),
+                "total_input_tokens":  state.get("total_input_tokens"),
+                "total_output_tokens": state.get("total_output_tokens"),
                 "hit_max_retry": state.get("retry_count", 0) >= 2,
-                "error": state.get("error"),
+                "error": agent_error,
                 "timestamp": datetime.now().isoformat(),
             }
         except TimeoutError as e:
@@ -532,8 +553,10 @@ def main():
                 "query": query_name,
                 "run_id": RUN_ID,
                 "git_commit": GIT_COMMIT,
+                "input": sql,
                 "elapsed_seconds": round(time.time() - query_start, 1),
                 "status": "timeout",
+                "score": 0,
                 "error": str(e),
                 "timestamp": datetime.now().isoformat(),
             }
@@ -543,8 +566,10 @@ def main():
                 "query": query_name,
                 "run_id": RUN_ID,
                 "git_commit": GIT_COMMIT,
+                "input": sql,
                 "elapsed_seconds": round(time.time() - query_start, 1),
                 "status": "exception",
+                "score": 0,
                 "error": str(e),
                 "timestamp": datetime.now().isoformat(),
             }

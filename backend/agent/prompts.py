@@ -12,6 +12,8 @@ Return ONLY a JSON array with no explanation or extra text, in this format:
 
 ADVICE_PROMPT = """You are a senior DBA. Based on the original SQL and the identified performance issues, provide specific optimization recommendations.
 
+If "Previous review feedback" is provided (not "None"), a previous version of your advice was rejected. You MUST directly address the reviewer's specific criticisms and correct the identified problems.
+
 Return ONLY a JSON object with no explanation or extra text, in this format:
 {{
   "advice": ["recommendation 1", "recommendation 2", "recommendation 3"],

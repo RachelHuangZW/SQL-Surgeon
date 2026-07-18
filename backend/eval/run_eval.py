@@ -3,6 +3,10 @@ import sys
 import json
 import re
 import signal
+import time
+import tracemalloc
+import subprocess
+import random, string
 import psycopg2
 from glob import glob
 from datetime import datetime
@@ -15,6 +19,16 @@ from agent.graph import app as agent_graph
 
 QUERY_DIR = os.path.expanduser("~/join-order-benchmark")
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")
+RUN_ID = ''.join(random.choices(string.ascii_lowercase, k=6))
+
+try:
+    GIT_COMMIT = subprocess.run(
+        ['git', 'rev-parse', '--short', 'HEAD'],
+        capture_output=True, text=True,
+        cwd=os.path.dirname(__file__)
+    ).stdout.strip() or "unknown"
+except Exception:
+    GIT_COMMIT = "unknown"
 
 
 def get_table_names(sql: str) -> list:
@@ -131,7 +145,7 @@ def oracle_greedy_gin(conn, sql: str, table_names: list) -> tuple:
             best_candidate = None
 
             for table, col in candidates:
-                idx_name = f"_b2gin_{table}_{col}"
+                idx_name = f"_b2gin_{RUN_ID}_{table}_{col}"
                 ddl = f"CREATE INDEX {idx_name} ON {table} USING gin ({col} gin_trgm_ops);"
                 created = False
                 try:
@@ -304,7 +318,7 @@ def oracle_greedy_combined(conn, sql: str, table_names: list) -> tuple:
                     best_candidate = ('btree', table, col, ddl)
 
             for table, col in gin_candidates:
-                idx_name = f"_b2comb_{table}_{col}"
+                idx_name = f"_b2comb_{RUN_ID}_{table}_{col}"
                 ddl = f"CREATE INDEX {idx_name} ON {table} USING gin ({col} gin_trgm_ops);"
                 created = False
                 try:
@@ -396,7 +410,11 @@ def main():
         print(f"No .sql files found in {QUERY_DIR}")
         return
     sql_files = sql_files[:1]  # TODO: remove after testing
+
+    RUN_RESULTS_DIR = os.path.join(RESULTS_DIR, RUN_ID)
+    os.makedirs(RUN_RESULTS_DIR, exist_ok=True)
     print(f"Found {len(sql_files)} queries to evaluate")
+    print(f"Run ID: {RUN_ID} | Git: {GIT_COMMIT} | Output: {RUN_RESULTS_DIR}")
 
     conn = psycopg2.connect(dsn)
     with conn.cursor() as cur:
@@ -422,11 +440,13 @@ def main():
         ddl_parts = [fetch_ddl(conn, t) for t in table_names]
         ddl = "\n".join(filter(None, ddl_parts))
 
-        out_path = os.path.join(RESULTS_DIR, f"{query_name}.json")
+        out_path = os.path.join(RUN_RESULTS_DIR, f"{query_name}.json")
         if os.path.exists(out_path):
             print(f"[{i+1}/{len(sql_files)}] Skip {query_name} (already done)")
             continue
 
+        tracemalloc.start()
+        query_start = time.time()
         signal.signal(signal.SIGALRM, _timeout_handler)
         signal.alarm(20 * 60)
         try:
@@ -437,7 +457,7 @@ def main():
             state = agent_graph.invoke({
                 "original_sql": sql,
                 "ddl": ddl,
-                "table_name": "",
+                "run_benchmark": False,
                 "retry_count": 0,
             })
 
@@ -462,8 +482,16 @@ def main():
                 l2_btree    = compute_l2_metrics(btree_ddls, b2_btree_indexes)
                 l2_combined = compute_l2_metrics(btree_ddls + gin_ddls, b2_combined_btree_indexes + b2_combined_gin_indexes)
 
+            elapsed = round(time.time() - query_start, 1)
+            _, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+
             result = {
                 "query": query_name,
+                "run_id": RUN_ID,
+                "git_commit": GIT_COMMIT,
+                "elapsed_seconds": elapsed,
+                "peak_memory_mb": round(peak / 1024 / 1024, 1),
                 "status": "error" if state.get("error") else "success",
                 # L1 execution cost
                 "b1_cost": b1_cost,
@@ -495,19 +523,27 @@ def main():
                 "timestamp": datetime.now().isoformat(),
             }
         except TimeoutError as e:
+            tracemalloc.stop()
             try:
                 conn.rollback()
             except Exception:
                 pass
             result = {
                 "query": query_name,
+                "run_id": RUN_ID,
+                "git_commit": GIT_COMMIT,
+                "elapsed_seconds": round(time.time() - query_start, 1),
                 "status": "timeout",
                 "error": str(e),
                 "timestamp": datetime.now().isoformat(),
             }
         except Exception as e:
+            tracemalloc.stop()
             result = {
                 "query": query_name,
+                "run_id": RUN_ID,
+                "git_commit": GIT_COMMIT,
+                "elapsed_seconds": round(time.time() - query_start, 1),
                 "status": "exception",
                 "error": str(e),
                 "timestamp": datetime.now().isoformat(),
@@ -516,20 +552,18 @@ def main():
             signal.alarm(0)
 
         results.append(result)
-
-        out_path = os.path.join(RESULTS_DIR, f"{query_name}.json")
         with open(out_path, "w") as f:
             json.dump(result, f, indent=2)
 
     conn.close()
 
-    summary_path = os.path.join(RESULTS_DIR, f"summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+    summary_path = os.path.join(RUN_RESULTS_DIR, "summary.json")
     with open(summary_path, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump({"run_id": RUN_ID, "git_commit": GIT_COMMIT, "results": results}, f, indent=2)
 
     success = sum(1 for r in results if r["status"] == "success")
     print(f"\nDone. {success}/{len(results)} queries succeeded.")
-    print(f"Results saved to {RESULTS_DIR}")
+    print(f"Results saved to {RUN_RESULTS_DIR}")
 
 
 if __name__ == "__main__":

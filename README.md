@@ -84,6 +84,26 @@ Because hypopg cannot simulate GIN indexes, a third path was added for queries w
 
 ## Metrics
 
+### Cost Unit
+
+All `*_cost` fields are **PostgreSQL planner cost estimates** — a unitless internal number, not milliseconds or bytes. The planner computes it from configurable parameters:
+
+| Parameter | Default | Meaning |
+|-----------|---------|---------|
+| `seq_page_cost` | 1.0 | Cost of reading one page sequentially |
+| `random_page_cost` | 4.0 | Cost of a random page read |
+| `cpu_tuple_cost` | 0.01 | Cost of processing one row |
+| `cpu_index_tuple_cost` | 0.005 | Cost of processing one index entry |
+| `cpu_operator_cost` | 0.0025 | Cost of one operator evaluation |
+
+These defaults vary by PostgreSQL version. The eval in this repo was run on **PostgreSQL 17** with default cost parameters (no tuning). Cost numbers from a different version or with tuned `pg_settings` will not be directly comparable.
+
+To reproduce: verify your settings with:
+```sql
+SELECT name, setting FROM pg_settings
+WHERE name IN ('seq_page_cost','random_page_cost','cpu_tuple_cost','cpu_index_tuple_cost','cpu_operator_cost');
+```
+
 ### Baseline Metrics (B1, B2)
 
 | Symbol | Meaning | Implementation |
@@ -273,12 +293,38 @@ The surgeon performed nearly optimally on both dimensions independently. The tru
 
 ---
 
+## JOB Benchmark Query Characteristics
+
+JOB queries have several quirks that affect how the pipeline behaves. These are systematic patterns across all 113 queries, not isolated cases.
+
+**Implicit comma-join syntax**
+
+JOB queries use the old SQL-89 style:
+```sql
+FROM cast_info ci, title t, movie_companies mc
+WHERE ci.movie_id = t.id AND ...
+```
+
+The eval pipeline's `get_table_names()` regex explicitly handles comma-separated table lists. The surgeon systematically rewrites these to explicit `INNER JOIN ... ON` syntax — this is a consistent behavior across all queries, not just 10a.
+
+**Leading wildcard LIKE (`LIKE '%pattern%'`)**
+
+Many JOB queries filter on text columns with patterns like `ci.note LIKE '%(voice)%'`. B-tree indexes are useless here — they require a fixed prefix. GIN with `pg_trgm` is the correct tool for arbitrary trigram matching.
+
+The surgeon correctly identifies this: when EXPLAIN shows a sequential scan on a text column with a LIKE filter, it recommends GIN. The planner's decision to actually *use* the GIN index depends on cost estimates — it may still prefer a sequential scan if it estimates the filter is not selective enough.
+
+**Constant selectivity**
+
+Some queries use constants that are highly selective (`production_year > 2005`) or nearly non-selective (`production_year > 1900`). The pipeline does not pre-process these. The EXPLAIN output implicitly captures the planner's selectivity estimates, and the surgeon's recommendations are conditioned on what EXPLAIN reveals. If a constant makes an index useless, the planner won't use it, EXPLAIN won't show it, and the surgeon won't recommend it.
+
+---
+
 ## Tech Stack
 
 | Layer | Technology |
 |-------|-----------|
 | Agent orchestration | LangGraph + LangChain |
-| LLM | Google Gemini 2.5 Pro |
+| LLM | Google Gemini 2.5 Pro (temperature=0.0 for eval reproducibility) |
 | Backend API | FastAPI + Uvicorn |
 | Database | PostgreSQL (via psycopg2) |
 | Hypothetical indexes | hypopg |

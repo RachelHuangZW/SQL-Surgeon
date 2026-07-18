@@ -18,7 +18,7 @@ api_key = os.getenv("GOOGLE_API_KEY")
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-pro",
     google_api_key=api_key,
-    temperature=0.1,
+    temperature=0.0,
     timeout=60
 )
 
@@ -105,14 +105,15 @@ def generate_advice(state: AgentState):
     # Node 3: generate advice based on issues found
     prompt = ChatPromptTemplate.from_messages([
         ("system", ADVICE_PROMPT),
-        ("user", "SQL: {original_sql}\nIssues: {issues}")
+        ("user", "SQL: {original_sql}\nIssues: {issues}\nPrevious review feedback: {feedback}")
     ])
 
     chain = prompt | llm
 
     response = chain.invoke({
         "original_sql": state.get("original_sql"),
-        "issues": state.get("issues")
+        "issues": state.get("issues"),
+        "feedback": state.get("feedback") or "None"
     })
 
     try:

@@ -22,7 +22,7 @@ app.add_middleware(
 class DiagnoseRequest(BaseModel):
     original_sql: str
     ddl: str
-    table_name: str
+    run_benchmark: bool = False
 
 class DiagnoseResponse(BaseModel):
     status: str
@@ -43,7 +43,7 @@ async def diagnose_sql(request: DiagnoseRequest):
         initial_state = {
             "original_sql": request.original_sql,
             "ddl": request.ddl,
-            "table_name": request.table_name,
+            "run_benchmark": request.run_benchmark,
             "issues": [],
             "advice": []
         }

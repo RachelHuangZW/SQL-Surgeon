@@ -119,8 +119,14 @@ def get_candidate_columns(conn, table_names: list) -> list:
     return candidates
 
 
-def get_gin_candidate_columns(conn, table_names: list) -> list:
-    # Returns [(table_name, column_name), ...] for TEXT/VARCHAR columns only
+def get_gin_candidate_columns(conn, table_names: list, sql: str = None) -> list:
+    # Returns [(table_name, column_name), ...] for TEXT/VARCHAR columns only.
+    # If sql is provided, restricts to columns that appear in LIKE predicates —
+    # GIN trgm is only useful for LIKE/ILIKE patterns, not arbitrary text columns.
+    like_cols = set()
+    if sql:
+        like_cols = set(re.findall(r'\b(\w+)\s+(?:NOT\s+)?LIKE\b', sql, re.IGNORECASE))
+
     candidates = []
     with conn.cursor() as cur:
         for table in table_names:
@@ -134,7 +140,8 @@ def get_gin_candidate_columns(conn, table_names: list) -> list:
                 (table,)
             )
             for (col,) in cur.fetchall():
-                candidates.append((table, col))
+                if not like_cols or col in like_cols:
+                    candidates.append((table, col))
     return candidates
 
 
@@ -150,7 +157,7 @@ def oracle_greedy_gin(conn, sql: str, table_names: list) -> tuple:
     except Exception:
         conn.rollback()
 
-    candidates = get_gin_candidate_columns(conn, table_names)
+    candidates = get_gin_candidate_columns(conn, table_names, sql=sql)
     selected_ddls = []
     selected_names = []
     current_cost = get_explain_cost(conn, sql)
@@ -315,7 +322,7 @@ def oracle_greedy_combined(conn, sql: str, table_names: list) -> tuple:
         conn.rollback()
 
     btree_candidates = get_candidate_columns(conn, table_names)
-    gin_candidates = get_gin_candidate_columns(conn, table_names)
+    gin_candidates = get_gin_candidate_columns(conn, table_names, sql=sql)
     selected_btree_ddls = []
     selected_gin_ddls = []
     selected_gin_names = []

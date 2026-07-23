@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m eval.summarize tsctih)",
+      "Bash(.venv/bin/python -m eval.summarize tsctih)"
+    ]
+  }
+}

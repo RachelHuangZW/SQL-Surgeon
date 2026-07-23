@@ -6,6 +6,7 @@ from agent.prompts import REVIEW_ADVICE_PROMPT
 
 import re
 import json
+import psycopg2
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -68,9 +69,47 @@ def run_explain_node(state: AgentState):
 
     try:
         plan = db_client.execute_explain(original_sql)
+        
+        # Enrich DDL with existing index information
+        table_names = list(set(re.findall(
+            r'(?:FROM|JOIN|,)\s+([a-zA-Z_][a-zA-Z0-9_]*)', original_sql, re.IGNORECASE
+        )))
+        enriched_ddl = state.get("ddl") or ""
+        try:
+            idx_conn = psycopg2.connect(dsn)
+            with idx_conn.cursor() as cur:
+                # Auto-fetch column definitions if user didn't provide DDL
+                if not enriched_ddl.strip():
+                    for table in table_names:
+                        cur.execute("""
+                            SELECT column_name, data_type
+                            FROM information_schema.columns
+                            WHERE table_schema = 'public' AND table_name = %s
+                            ORDER BY ordinal_position
+                        """, (table,))
+                        cols = cur.fetchall()
+                        if cols:
+                            col_defs = ", ".join(f"{name} {dtype}" for name, dtype in cols)
+                            enriched_ddl += f"CREATE TABLE {table} ({col_defs});\n"
+                # Always append existing index information
+                for table in table_names:
+                    cur.execute("""
+                        SELECT indexname, indexdef FROM pg_indexes
+                        WHERE schemaname = 'public' AND tablename = %s
+                    """, (table,))
+                    indexes = cur.fetchall()
+                    if indexes:
+                        lines = "\n".join(f"--   {name}: {defn}" for name, defn in indexes)
+                        enriched_ddl += f"\n-- Existing indexes on {table}:\n{lines}"
+                    else:
+                        enriched_ddl += f"\n-- Existing indexes on {table}: NONE"
+            idx_conn.close()
+        except Exception:
+            pass  # DDL enrichment is best-effort; don't fail the whole workflow
 
         return {
             "explain_output": plan,
+            "ddl": enriched_ddl,
             "error": None
         }
     except Exception as e:

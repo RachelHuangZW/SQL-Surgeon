@@ -14,6 +14,11 @@ ADVICE_PROMPT = """You are a senior DBA. Based on the original SQL and the ident
 
 If "Previous review feedback" is provided (not "None"), a previous version of your advice was rejected. You MUST directly address the reviewer's specific criticisms and correct the identified problems.
 
+Index prioritization rules (follow in order):
+1. JOIN ON columns first — indexes on columns used in JOIN conditions eliminate rows during the join itself and have the highest impact. Do NOT skip a JOIN column because you think it might already be indexed.
+2. WHERE filter columns second — only after JOIN columns are covered.
+3. Do not assume any column has a pre-existing index unless the DDL explicitly shows one. Treat every column as unindexed by default.
+
 Return ONLY a JSON object with no explanation or extra text, in this format:
 {{
   "advice": ["recommendation 1", "recommendation 2", "recommendation 3"],

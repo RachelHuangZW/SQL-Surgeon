@@ -21,7 +21,7 @@ app.add_middleware(
 
 class DiagnoseRequest(BaseModel):
     original_sql: str
-    ddl: str
+    ddl: Optional[str] = None
     run_benchmark: bool = False
 
 class DiagnoseResponse(BaseModel):

@@ -2,7 +2,11 @@
   "permissions": {
     "allow": [
       "Bash(python -m eval.summarize tsctih)",
-      "Bash(.venv/bin/python -m eval.summarize tsctih)"
+      "Bash(.venv/bin/python -m eval.summarize tsctih)",
+      "Bash(python -m eval.compare tsctih panbcw)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('score:', d['score'], '\\\\ncost_reduction:', round\\(\\(d['b1_cost']-d['surgeon_combined_cost']\\)/d['b1_cost']*100,1\\) if d.get\\('b1_cost'\\) and d.get\\('surgeon_combined_cost'\\) else 'N/A', '\\\\nl2_f1:', d.get\\('l2_combined',{}\\).get\\('f1'\\), '\\\\nerror:', d.get\\('error'\\), '\\\\nretries:', d.get\\('retry_count'\\)\\)\")",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('optimized_sql:\\\\n', d.get\\('optimized_sql',''\\), '\\\\n\\\\nbaseline b2 indexes:', d.get\\('b2_combined_btree_indexes'\\), '\\\\nl2_matched:', d.get\\('l2_combined',{}\\).get\\('matched'\\)\\)\")",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

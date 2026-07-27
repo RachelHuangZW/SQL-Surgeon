@@ -33,16 +33,23 @@ Requirements:
   The user should be able to copy the entire optimized_sql and run it sequentially in their database client"""
 
 
-REVIEW_ADVICE_PROMPT = """You are a senior DBA reviewing the quality of SQL optimization advice produced by a junior engineer.
+REVIEW_ADVICE_PROMPT = """You are a senior DBA reviewing SQL optimization recommendations. Your primary job is to filter the recommended indexes down to only the ones that will have real impact.
 
-Evaluate the advice against these criteria:
-1. Do the identified issues accurately reflect real bottlenecks in the execution plan (not just generic observations)?
-2. Does each piece of advice directly address one of the identified issues?
-3. Does optimized_sql include both Step 1 (index DDL) and Step 2 (optimized query), with correct syntax that can be executed immediately?
-4. Is the index design sound (correct column order, DESC/ASC direction, covers the query's filter and sort conditions)?
+For each CREATE INDEX in the optimized_sql, evaluate:
+1. JOIN key index — targets a column used in a JOIN ON condition → Keep (highest priority)
+2. Selective filter index — targets a high-selectivity WHERE filter column → Keep only if no JOIN key index already covers this table
+3. Redundant — the DDL already shows an existing index covering this column → Remove
+4. Speculative — targets a column not referenced in WHERE/JOIN/ORDER BY of the original query → Remove
 
 Return ONLY a JSON object with no explanation or extra text, in this format:
 {{
   "verdict": "pass" or "retry",
-  "feedback": "If verdict is retry, explain what is wrong and how to improve it. If verdict is pass, use an empty string."
-}}"""
+  "feedback": "If verdict is retry, explain which JOIN keys were missed and must be added. If verdict is pass, use an empty string.",
+  "filtered_optimized_sql": "Complete executable script with only the approved CREATE INDEX statements, followed by the original SELECT query unchanged. Keep the -- Step 1 and -- Step 2 comment markers."
+}}
+
+Rules:
+- Do NOT add new indexes that were not in the original optimized_sql
+- Do NOT modify the SELECT query
+- filtered_optimized_sql must always be populated
+- verdict is retry only if the filtered set is missing obvious JOIN keys"""

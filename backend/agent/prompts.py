@@ -34,8 +34,9 @@ Return ONLY a JSON object with no explanation or extra text, in this format:
 Requirements:
 - advice: each item is one concise English optimization recommendation
 - optimized_sql: must be a complete executable script with two sections separated by comments:
-  Section 1: CREATE INDEX statement (if needed), prefixed with "-- Step 1: Create index (run once)"
-  Section 2: the optimized query (original or rewritten), prefixed with "-- Step 2: Run the optimized query"
+  Section 1: CREATE INDEX statements (if needed), prefixed with "-- Step 1: Create index (run once)"
+  Section 2: the query unchanged, prefixed with "-- Step 2: Run the optimized query"
+  The SQL has already been normalized (comma-joins converted to explicit JOINs). Do NOT restructure the SQL — only add indexes in Step 1 and copy the SQL as-is in Step 2.
   The user should be able to copy the entire optimized_sql and run it sequentially in their database client"""
 
 

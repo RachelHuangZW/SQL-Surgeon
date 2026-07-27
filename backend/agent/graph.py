@@ -1,6 +1,7 @@
 from langgraph.graph import StateGraph, END
 from agent.state import AgentState
 from agent.nodes import (
+    preprocess_sql_node,
     run_explain_node,
     identify_issues,
     generate_advice,
@@ -35,13 +36,15 @@ def route_after_review(state: AgentState):
 def create_graph():
     workflow = StateGraph(AgentState)
 
+    workflow.add_node("preprocess_sql", preprocess_sql_node)
     workflow.add_node("run_explain", run_explain_node)
     workflow.add_node("identify_issue", identify_issues)
     workflow.add_node("generate_advice", generate_advice)
     workflow.add_node("review_advice", review_advice)
     workflow.add_node("generate_benchmark_schema", generate_benchmark_schema)
 
-    workflow.set_entry_point("run_explain")
+    workflow.set_entry_point("preprocess_sql")
+    workflow.add_edge("preprocess_sql", "run_explain")
 
     workflow.add_conditional_edges("run_explain", should_continue, {"continue": "identify_issue", "end": END})
     workflow.add_conditional_edges("identify_issue", should_continue, {"continue": "generate_advice", "end": END})

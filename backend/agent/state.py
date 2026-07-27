@@ -16,6 +16,7 @@ class AgentState(TypedDict):
     total_input_tokens: Optional[int]
     total_output_tokens: Optional[int]
     seq_scan_analyses: Optional[List[dict]]
+    normalized_sql: Optional[str]
 
 
 

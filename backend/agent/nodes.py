@@ -23,6 +23,137 @@ llm = ChatGoogleGenerativeAI(
     timeout=60
 )
 
+def _parse_from_tables(from_clause: str) -> list:
+    """Return [(alias, table_name), ...] preserving original case."""
+    entries = []
+    for entry in from_clause.split(','):
+        entry = re.sub(r'\s+', ' ', entry).strip()
+        m = re.match(r'(\w+)\s+(?:AS\s+)?(\w+)\s*$', entry, re.IGNORECASE)
+        if m:
+            entries.append((m.group(2), m.group(1)))  # (alias, table_name)
+        else:
+            m2 = re.match(r'^(\w+)$', entry)
+            if m2:
+                entries.append((m2.group(1), m2.group(1)))
+    return entries
+
+
+def _split_and_conditions(clause: str) -> list:
+    """Split SQL conditions on top-level AND, respecting parentheses."""
+    parts, depth, start = [], 0, 0
+    upper = clause.upper()
+    i = 0
+    while i < len(clause):
+        if clause[i] == '(':
+            depth += 1
+        elif clause[i] == ')':
+            depth -= 1
+        elif depth == 0 and upper[i:i+3] == 'AND':
+            before_ok = i == 0 or not clause[i-1].isalnum() and clause[i-1] != '_'
+            after_ok  = i+3 >= len(clause) or (not clause[i+3].isalnum() and clause[i+3] != '_')
+            if before_ok and after_ok:
+                parts.append(clause[start:i].strip())
+                i += 3
+                start = i
+                continue
+        i += 1
+    parts.append(clause[start:].strip())
+    return [p for p in parts if p]
+
+
+def rewrite_comma_join(sql: str) -> str:
+    """Convert comma-style implicit joins to explicit JOIN syntax.
+    Returns original SQL unchanged if no comma-join pattern is detected or rewrite fails.
+    """
+    s = re.sub(r'[ \t]+', ' ', sql).strip()
+
+    m_from  = re.search(r'\bFROM\b',  s, re.IGNORECASE)
+    m_where = re.search(r'\bWHERE\b', s, re.IGNORECASE)
+    if not m_from or not m_where or m_from.start() > m_where.start():
+        return sql
+
+    from_clause = s[m_from.end():m_where.start()].strip()
+    if ',' not in from_clause:
+        return sql
+
+    table_entries = _parse_from_tables(from_clause)
+    if len(table_entries) < 2:
+        return sql
+
+    alias_map = {alias.lower(): (alias, tname) for alias, tname in table_entries}
+    all_aliases = set(alias_map.keys())
+
+    rest = s[m_where.end():].strip()
+    trailing_m = re.search(
+        r'\b(GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|UNION)\b', rest, re.IGNORECASE
+    )
+    if trailing_m:
+        where_str = rest[:trailing_m.start()].rstrip()
+        trailing  = '\n' + rest[trailing_m.start():]
+    else:
+        trailing  = ';' if rest.rstrip().endswith(';') else ''
+        where_str = rest.rstrip(';').strip()
+
+    conditions   = _split_and_conditions(where_str)
+    join_graph   = {}
+    filter_conds = []
+    join_pat     = re.compile(r'^(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)$', re.IGNORECASE)
+
+    for cond in conditions:
+        mc = join_pat.match(cond.strip())
+        if mc:
+            a1, _, a2, _ = mc.groups()
+            if a1.lower() in all_aliases and a2.lower() in all_aliases and a1.lower() != a2.lower():
+                key = tuple(sorted([a1.lower(), a2.lower()]))
+                join_graph.setdefault(key, []).append(cond.strip())
+                continue
+        filter_conds.append(cond.strip())
+
+    # BFS to build JOIN chain
+    first_alias_lower = table_entries[0][0].lower()
+    joined    = {first_alias_lower}
+    remaining = {e[0].lower() for e in table_entries[1:]}
+    join_clauses = []
+
+    for _ in range(len(table_entries)):
+        if not remaining:
+            break
+        progress = False
+        for al in list(remaining):
+            for jl in list(joined):
+                key = tuple(sorted([al, jl]))
+                if key in join_graph:
+                    on_clause = ' AND '.join(join_graph[key])
+                    orig_alias, tname = alias_map[al]
+                    clause = f'JOIN {tname} AS {orig_alias} ON {on_clause}' if orig_alias.lower() != tname.lower() else f'JOIN {tname} ON {on_clause}'
+                    join_clauses.append(clause)
+                    joined.add(al)
+                    remaining.discard(al)
+                    progress = True
+                    break
+        if not progress:
+            return sql  # disconnected graph — fall back to original
+
+    if remaining:
+        return sql
+
+    select_part = s[:m_from.start()].strip()
+    orig_first_alias, first_tname = alias_map[first_alias_lower]
+    from_part = f'FROM {first_tname} AS {orig_first_alias}' if orig_first_alias.lower() != first_tname.lower() else f'FROM {first_tname}'
+
+    lines = [select_part, from_part] + join_clauses
+    if filter_conds:
+        lines.append('WHERE ' + '\n  AND '.join(filter_conds))
+
+    return '\n'.join(lines) + trailing
+
+
+def preprocess_sql_node(state: AgentState):
+    # Node 0: deterministically normalize SQL before LLM analysis
+    original_sql = state.get("original_sql") or ""
+    return {"normalized_sql": rewrite_comma_join(original_sql)}
+
+
 def _traverse_plan(node: dict, results: list):
     if node.get("Node Type") == "Seq Scan":
         rows_removed = node.get("Rows Removed by Filter", 0)
@@ -98,12 +229,14 @@ def run_explain_node(state: AgentState):
     if not original_sql:
         return {"error": "No Original SQL found"}
 
+    sql_to_explain = state.get("normalized_sql") or original_sql
+
     try:
-        plan = db_client.execute_explain(original_sql)
-        
+        plan = db_client.execute_explain(sql_to_explain)
+
         # Enrich DDL with existing index information
         table_names = list(set(re.findall(
-            r'(?:FROM|JOIN|,)\s+([a-zA-Z_][a-zA-Z0-9_]*)', original_sql, re.IGNORECASE
+            r'(?:FROM|JOIN|,)\s+([a-zA-Z_][a-zA-Z0-9_]*)', sql_to_explain, re.IGNORECASE
         )))
         enriched_ddl = state.get("ddl") or ""
         try:
@@ -190,7 +323,7 @@ def generate_advice(state: AgentState):
     chain = prompt | llm
 
     response = chain.invoke({
-        "original_sql": state.get("original_sql"),
+        "original_sql": state.get("normalized_sql") or state.get("original_sql"),
         "issues": state.get("issues"),
         "feedback": state.get("feedback") or "None"
     })

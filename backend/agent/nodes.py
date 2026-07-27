@@ -23,6 +23,37 @@ llm = ChatGoogleGenerativeAI(
     timeout=60
 )
 
+def _traverse_plan(node: dict, results: list):
+    if node.get("Node Type") == "Seq Scan":
+        rows_removed = node.get("Rows Removed by Filter", 0)
+        actual_rows = node.get("Actual Rows", 0)
+        total_scanned = rows_removed + actual_rows
+        if total_scanned > 0:
+            selectivity = actual_rows / total_scanned
+            if selectivity > 0.30:
+                verdict = "seq_scan_optimal"
+            elif actual_rows < 10_000:
+                verdict = "index_likely_helpful"
+            else:
+                verdict = "gray_zone"
+            results.append({
+                "table": node.get("Relation Name", "unknown"),
+                "selectivity": round(selectivity, 3),
+                "absolute_rows": actual_rows,
+                "verdict": verdict
+            })
+    for child in node.get("Plans", []):
+        _traverse_plan(child, results)
+
+
+def compute_seq_scan_analysis(explain_output: list) -> list:
+    results = []
+    if not explain_output:
+        return results
+    _traverse_plan(explain_output[0].get("Plan", {}), results)
+    return results
+
+
 def strip_code_block(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
@@ -110,6 +141,7 @@ def run_explain_node(state: AgentState):
         return {
             "explain_output": plan,
             "ddl": enriched_ddl,
+            "seq_scan_analyses": compute_seq_scan_analysis(plan),
             "error": None
         }
     except Exception as e:
@@ -122,7 +154,7 @@ def identify_issues(state: AgentState):
     # Node 2: use LLM to identify DB issues from EXPLAIN PLAN
     prompt = ChatPromptTemplate.from_messages([
         ("system", ANALYSIS_PROMPT),
-        ("user", "DDL: {ddl}\nExecution_Plan: {execution_plan}\nPrevious feedback: {feedback}")
+        ("user", "DDL: {ddl}\nExecution_Plan: {execution_plan}\nSeq Scan Analysis: {seq_scan_analyses}\nPrevious feedback: {feedback}")
     ])
 
     chain = prompt | llm
@@ -130,6 +162,7 @@ def identify_issues(state: AgentState):
     response = chain.invoke({
         "ddl": state.get("ddl"),
         "execution_plan": state.get("explain_output"),
+        "seq_scan_analyses": state.get("seq_scan_analyses") or [],
         "feedback": state.get("feedback") or "None"
     })
 

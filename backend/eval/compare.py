@@ -61,6 +61,31 @@ def extract_aggregate(results: dict) -> dict:
     }
 
 
+def classify_fail_reason(r: dict) -> str:
+    """Classify why a score=0 result failed."""
+    if r.get("score") == 1:
+        return "pass"
+    error = r.get("error") or r.get("agent_error") or ""
+    status = r.get("status", "")
+    if error and any(w in error for w in ["429", "RESOURCE_EXHAUSTED", "spending cap"]):
+        return "api_error"
+    if status == "exception" or (error and any(w in error.lower() for w in ["timeout", "timed out", "read operation timed out"])):
+        return "timeout"
+    b1     = r.get("b1_cost")
+    s_cost = r.get("surgeon_combined_cost")
+    if b1 and s_cost is not None and (b1 - s_cost) / b1 < 0.10:
+        return "low_cost_reduction"
+    precision = (r.get("l2_combined") or {}).get("precision", 0)
+    recall    = (r.get("l2_combined") or {}).get("recall",    0)
+    if precision < 0.5 and recall >= 0.5:
+        return "low_precision"   # over-indexing: too many indexes recommended
+    if recall < 0.5 and precision >= 0.5:
+        return "low_recall"      # under-indexing: missed key indexes
+    if precision < 0.5 and recall < 0.5:
+        return "low_f1"          # both wrong
+    return "other"
+
+
 def categorize_per_query(base: dict, curr: dict) -> dict:
     all_queries = sorted(set(base.keys()) | set(curr.keys()))
     improved, regressed, stable_pass, stable_fail, only_in_base, only_in_curr = [], [], [], [], [], []
@@ -153,6 +178,28 @@ def compare(baseline_id: str, current_id: str):
         for r in cats["regressed"]:
             err = f" — {r['curr_error']}" if r.get("curr_error") else ""
             print(f"    {r['query']}: baseline=pass, current={r['curr_status']}{err}")
+
+    # --- Fail reason breakdown for all score=0 in current run ---
+    fail_buckets: dict[str, list] = {}
+    for q, r in curr.items():
+        if r.get("score", 0) == 0:
+            reason = classify_fail_reason(r)
+            fail_buckets.setdefault(reason, []).append(q)
+    if fail_buckets:
+        print(f"\n  Fail reason breakdown (score=0 in current run):")
+        for reason in ["timeout", "api_error", "low_cost_reduction", "low_precision", "low_recall", "low_f1", "other"]:
+            qs = fail_buckets.get(reason, [])
+            if qs:
+                label = {
+                    "timeout":            "timeout          (infra)",
+                    "api_error":          "api_error        (infra)",
+                    "low_cost_reduction": "low_cost_reduction  (surgeon didn't help)",
+                    "low_precision":      "low_precision    (over-indexing)",
+                    "low_recall":         "low_recall       (under-indexing)",
+                    "low_f1":             "low_f1           (both wrong)",
+                    "other":              "other",
+                }[reason]
+                print(f"    {label}: {len(qs):2d}  {qs}")
 
     # --- Verdict ---
     print("\n" + "=" * 70)

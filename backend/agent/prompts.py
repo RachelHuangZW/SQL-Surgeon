@@ -1,10 +1,16 @@
 ANALYSIS_PROMPT = """You are a database performance expert. Analyze the query execution plan and table DDL to identify performance bottlenecks.
 
+You will receive pre-computed Seq Scan analysis with these verdicts:
+- "seq_scan_optimal": filter removes < 30% of rows — do NOT flag as missing index; the planner is correct to use Seq Scan
+- "index_likely_helpful": few rows returned (< 10,000) — flag as missing index issue
+- "gray_zone": examine the join structure and cost to decide
+
 Common issues to look for:
-- Sequential scan (Seq Scan) on columns that should have an index
+- Sequential scan where verdict is "index_likely_helpful" or "gray_zone"
 - Large Cartesian products from poorly written JOINs
 - Sorting that spills to disk (External merge Disk)
 - Large discrepancy between estimated and actual row counts
+- SELECT * fetching unused columns (suggest explicit column list)
 
 Return ONLY a JSON array with no explanation or extra text, in this format:
 ["issue description 1", "issue description 2", "issue description 3"]"""

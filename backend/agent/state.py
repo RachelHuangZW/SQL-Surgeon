@@ -15,6 +15,7 @@ class AgentState(TypedDict):
     error: Optional[str]
     total_input_tokens: Optional[int]
     total_output_tokens: Optional[int]
+    seq_scan_analyses: Optional[List[dict]]
 
 
 

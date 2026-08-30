@@ -538,8 +538,10 @@ def main():
                 "l2_btree": l2_btree,
                 "l2_combined": l2_combined,
                 # Agent output
+                "normalized_sql": state.get("normalized_sql"),
                 "issues": state.get("issues"),
                 "advice": state.get("advice"),
+                "filtered_indexes": state.get("filtered_indexes"),
                 "optimized_sql": optimized_sql,
                 # L3 internal health
                 "retry_count": state.get("retry_count"),

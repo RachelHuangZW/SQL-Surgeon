@@ -6,7 +6,11 @@
       "Bash(python -m eval.compare tsctih panbcw)",
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('score:', d['score'], '\\\\ncost_reduction:', round\\(\\(d['b1_cost']-d['surgeon_combined_cost']\\)/d['b1_cost']*100,1\\) if d.get\\('b1_cost'\\) and d.get\\('surgeon_combined_cost'\\) else 'N/A', '\\\\nl2_f1:', d.get\\('l2_combined',{}\\).get\\('f1'\\), '\\\\nerror:', d.get\\('error'\\), '\\\\nretries:', d.get\\('retry_count'\\)\\)\")",
       "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); print\\('optimized_sql:\\\\n', d.get\\('optimized_sql',''\\), '\\\\n\\\\nbaseline b2 indexes:', d.get\\('b2_combined_btree_indexes'\\), '\\\\nl2_matched:', d.get\\('l2_combined',{}\\).get\\('matched'\\)\\)\")",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(mkdir -p ~/.claude/skills/grill-me)",
+      "Bash(curl -s -o ~/.claude/skills/grill-me/SKILL.md https://raw.githubusercontent.com/mattpocock/skills/main/skills/productivity/grill-me/SKILL.md)",
+      "Bash(mkdir -p ~/.claude/skills/grilling)",
+      "Bash(curl -s -o ~/.claude/skills/grilling/SKILL.md https://raw.githubusercontent.com/mattpocock/skills/main/skills/productivity/grilling/SKILL.md)"
     ]
   }
 }

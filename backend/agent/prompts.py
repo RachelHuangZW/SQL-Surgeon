@@ -27,22 +27,26 @@ Index prioritization rules (follow in order):
 
 Return ONLY a JSON object with no explanation or extra text, in this format:
 {{
-  "advice": ["recommendation 1", "recommendation 2", "recommendation 3"],
-  "optimized_sql": "CREATE INDEX ... or rewritten SELECT ..."
+  "advice": ["high-level recommendation 1", "high-level recommendation 2"],
+  "indexes": [
+    {{"ddl": "CREATE INDEX idx_name ON table(col);", "reason": "one-sentence reason tied to a specific WHERE/JOIN/ORDER BY in this query"}},
+    ...
+  ],
+  "optimized_sql": "-- Step 1: Create indexes (run once)\\nCREATE INDEX ...\\n-- Step 2: Run the optimized query\\nSELECT ..."
 }}
 
 Requirements:
-- advice: each item is one concise English optimization recommendation
-- optimized_sql: must be a complete executable script with two sections separated by comments:
-  Section 1: CREATE INDEX statements (if needed), prefixed with "-- Step 1: Create index (run once)"
-  Section 2: the query unchanged, prefixed with "-- Step 2: Run the optimized query"
-  The SQL has already been normalized (comma-joins converted to explicit JOINs). Do NOT restructure the SQL — only add indexes in Step 1 and copy the SQL as-is in Step 2.
+- advice: 2-4 high-level strategic observations (why this query is slow, what approach to take)
+- indexes: one entry per CREATE INDEX — ddl is the exact statement, reason explains why this specific column helps this specific query
+- optimized_sql: complete executable script, Step 1 = all CREATE INDEX statements, Step 2 = query unchanged (do NOT restructure the SQL)
   The user should be able to copy the entire optimized_sql and run it sequentially in their database client"""
 
 
 REVIEW_ADVICE_PROMPT = """You are a senior DBA reviewing SQL optimization recommendations. Your primary job is to filter the recommended indexes down to only the ones that will have real impact.
 
-For each CREATE INDEX in the optimized_sql, evaluate:
+You will receive an Indexes list where each item has {{ddl, reason}}.
+
+For each index, evaluate:
 1. JOIN key index — targets a column used in a JOIN ON condition → Keep (highest priority)
 2. Selective filter index — targets a high-selectivity WHERE filter column → Keep only if no JOIN key index already covers this table
 3. Redundant — the DDL already shows an existing index covering this column → Remove
@@ -52,11 +56,14 @@ Return ONLY a JSON object with no explanation or extra text, in this format:
 {{
   "verdict": "pass" or "retry",
   "feedback": "If verdict is retry, explain which JOIN keys were missed and must be added. If verdict is pass, use an empty string.",
+  "filtered_indexes": [
+    {{"ddl": "CREATE INDEX...", "reason": "..."}}
+  ],
   "filtered_optimized_sql": "Complete executable script with only the approved CREATE INDEX statements, followed by the original SELECT query unchanged. Keep the -- Step 1 and -- Step 2 comment markers."
 }}
 
 Rules:
-- Do NOT add new indexes that were not in the original optimized_sql
+- Do NOT add new indexes that were not in the original indexes list
 - Do NOT modify the SELECT query
-- filtered_optimized_sql must always be populated
+- filtered_indexes and filtered_optimized_sql must always be populated
 - verdict is retry only if the filtered set is missing obvious JOIN keys"""

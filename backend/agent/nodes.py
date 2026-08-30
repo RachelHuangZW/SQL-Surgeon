@@ -200,6 +200,7 @@ EXTENSION_DEPS = {
 
 
 def inject_extension_deps(optimized_sql: str) -> str:
+    # Detect extension-dependent index ops (e.g. gin_trgm_ops) and prepend the required CREATE EXTENSION statement if missing.
     needed = []
     for pattern, stmt in EXTENSION_DEPS.items():
         if re.search(pattern, optimized_sql, re.IGNORECASE):

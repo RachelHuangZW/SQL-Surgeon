@@ -103,13 +103,16 @@ export default function ResultPanel({ result, loading, error }: Props) {
         </Section>
       )}
 
-      {result.advice.length > 0 && (
-        <Section title={<>✓ Recommendations <span className="text-slate-500 font-normal normal-case">({result.advice.length})</span></>} color="text-emerald-400">
-          <ul className="flex flex-col gap-2">
-            {result.advice.map((item, i) => (
-              <li key={i} className="flex gap-3 text-sm text-slate-300 bg-slate-900 rounded-lg p-3 border border-slate-800">
-                <span className="text-emerald-500/70 font-mono text-xs mt-0.5 shrink-0 w-4">{i + 1}.</span>
-                <span className="leading-relaxed">{item}</span>
+      {result.filtered_indexes && result.filtered_indexes.length > 0 && (
+        <Section title={<>✓ Index Recommendations <span className="text-slate-500 font-normal normal-case">({result.filtered_indexes.length})</span></>} color="text-emerald-400">
+          <ul className="flex flex-col gap-3">
+            {result.filtered_indexes.map((idx, i) => (
+              <li key={i} className="flex flex-col gap-1.5 bg-slate-900 rounded-lg p-3 border border-slate-800">
+                <div className="flex items-start justify-between gap-2">
+                  <code className="text-xs font-mono text-green-300 leading-relaxed">{idx.ddl}</code>
+                  <CopyButton text={idx.ddl} />
+                </div>
+                <p className="text-xs text-slate-400 leading-relaxed">{idx.reason}</p>
               </li>
             ))}
           </ul>

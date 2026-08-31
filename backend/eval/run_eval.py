@@ -432,7 +432,8 @@ def main():
     if not sql_files:
         print(f"No .sql files found in {QUERY_DIR}")
         return
-    sql_files = sql_files[:30]
+    MINI_EVAL = {"13a", "13c", "13d", "11d", "12c"}
+    sql_files = [f for f in sql_files if os.path.basename(f).replace(".sql", "") in MINI_EVAL]
 
     RUN_RESULTS_DIR = os.path.join(RESULTS_DIR, RUN_ID)
     os.makedirs(RUN_RESULTS_DIR, exist_ok=True)

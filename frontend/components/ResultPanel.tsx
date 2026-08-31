@@ -90,6 +90,24 @@ export default function ResultPanel({ result, loading, error }: Props) {
 
   return (
     <div className="flex flex-col h-full overflow-y-auto p-5 gap-6">
+      {result.execution_time_ms != null && (
+        <div className="flex items-center gap-4 bg-slate-900 border border-slate-800 rounded-lg px-4 py-3 text-sm">
+          <div className="flex flex-col">
+            <span className="text-xs text-slate-500 uppercase tracking-wider">Current execution time</span>
+            <span className="text-slate-100 font-mono font-medium">{result.execution_time_ms.toFixed(1)} ms</span>
+          </div>
+          {result.filtered_indexes && result.filtered_indexes.length > 0 && (
+            <>
+              <span className="text-slate-700">→</span>
+              <div className="flex flex-col">
+                <span className="text-xs text-slate-500 uppercase tracking-wider">Expected after indexes</span>
+                <span className="text-emerald-400 font-medium">Faster (planner cost reduced)</span>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
       {result.issues.length > 0 && (
         <Section title={<>⚠ Issues Found <span className="text-slate-500 font-normal normal-case">({result.issues.length})</span></>} color="text-amber-400">
           <ul className="flex flex-col gap-2">

@@ -22,6 +22,8 @@ If "Previous review feedback" is provided (not "None"), a previous version of yo
 
 Index prioritization rules (follow in order):
 1. JOIN ON columns first — indexes on columns used in JOIN conditions eliminate rows during the join itself and have the highest impact. Do NOT skip a JOIN column because you think it might already be indexed.
+   - If multiple JOIN key columns from the same table appear together in one ON clause, create ONE composite index covering both columns instead of two separate indexes.
+   - Limit to 1 index per table for JOIN keys — do not create separate indexes for every JOIN column on the same table.
 2. WHERE filter columns second — only after JOIN columns are covered.
 3. Do not assume any column has a pre-existing index unless the DDL explicitly shows one. Treat every column as unindexed by default.
 
@@ -48,6 +50,8 @@ You will receive an Indexes list where each item has {{ddl, reason}}.
 
 For each index, evaluate:
 1. JOIN key index — targets a column used in a JOIN ON condition → Keep (highest priority)
+   - Keep at most 1 JOIN key index per table. If multiple JOIN key indexes target the same table,
+     keep only the most selective one (fewest actual rows in the execution plan). Remove the rest.
 2. Selective filter index — targets a high-selectivity WHERE filter column → Keep only if no JOIN key index already covers this table
 3. Redundant — the DDL already shows an existing index covering this column → Remove
 4. Speculative — targets a column not referenced in WHERE/JOIN/ORDER BY of the original query → Remove

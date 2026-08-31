@@ -29,6 +29,8 @@ class DiagnoseResponse(BaseModel):
     explain_output: Optional[List[dict]]
     issues: List[str]
     advice: Optional[List[str]]
+    filtered_indexes: Optional[List[dict]]
+    execution_time_ms: Optional[float]
     benchmark_result: Optional[List[dict]]
     optimized_sql: Optional[str]
     error: Optional[str]
@@ -65,6 +67,8 @@ async def diagnose_sql(request: DiagnoseRequest):
             explain_output = final_state.get("explain_output"),
             issues = final_state.get("issues", []),
             advice = final_state.get("advice"),
+            filtered_indexes = final_state.get("filtered_indexes"),
+            execution_time_ms = (final_state.get("explain_output") or [{}])[0].get("Execution Time"),
             benchmark_result = final_state.get("benchmark_result"),
             optimized_sql = final_state.get("optimized_sql"),
             error = None

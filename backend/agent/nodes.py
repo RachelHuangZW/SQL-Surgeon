@@ -154,6 +154,53 @@ def preprocess_sql_node(state: AgentState):
     return {"normalized_sql": rewrite_comma_join(original_sql)}
 
 
+def rewrite_sql_node(state: AgentState):
+    # Rule-based SQL rewriting: safe structural rewrites + warnings for risky patterns.
+    sql = state.get("normalized_sql") or state.get("original_sql", "")
+    rewritten = sql
+    rewrites_applied = []
+    warnings = []
+
+    # Warn: SELECT * — downstream consumer unknown, can't safely pick columns
+    if re.search(r'\bSELECT\s+\*', rewritten, re.IGNORECASE):
+        warnings.append(
+            "SELECT * detected — list only the columns your application needs "
+            "to reduce I/O and enable index-only scans"
+        )
+
+    # Warn: correlated EXISTS/NOT EXISTS subquery
+    if re.search(r'\b(?:NOT\s+)?EXISTS\s*\(\s*SELECT', rewritten, re.IGNORECASE):
+        warnings.append(
+            "EXISTS subquery detected — PostgreSQL usually unnests these automatically; "
+            "if cost is still high, consider rewriting as a JOIN"
+        )
+
+    # Rewrite: DISTINCT where GROUP BY already guarantees uniqueness
+    distinct_m = re.search(
+        r'SELECT\s+DISTINCT\s+([\w\s,\.]+?)\s+FROM', rewritten, re.IGNORECASE
+    )
+    groupby_m = re.search(
+        r'\bGROUP\s+BY\s+([\w\s,\.]+?)(?:\s+(?:HAVING|ORDER|LIMIT|UNION|$))',
+        rewritten, re.IGNORECASE | re.DOTALL
+    )
+    if distinct_m and groupby_m:
+        sel_cols = {c.strip().lower().split('.')[-1] for c in distinct_m.group(1).split(',')}
+        grp_cols = {c.strip().lower().split('.')[-1] for c in groupby_m.group(1).split(',')}
+        if sel_cols and sel_cols == grp_cols:
+            rewritten = re.sub(
+                r'\bSELECT\s+DISTINCT\b', 'SELECT', rewritten,
+                count=1, flags=re.IGNORECASE
+            )
+            rewrites_applied.append(
+                "Removed redundant DISTINCT — GROUP BY already guarantees uniqueness"
+            )
+
+    return {
+        "rewritten_sql": rewritten if rewrites_applied else None,
+        "rewrite_warnings": warnings,
+    }
+    
+
 def _traverse_plan(node: dict, results: list):
     if node.get("Node Type") == "Seq Scan":
         rows_removed = node.get("Rows Removed by Filter", 0)
@@ -222,7 +269,7 @@ def run_explain_node(state: AgentState):
     dsn = os.getenv("DATABASE_URL")
     if not dsn:
         return {"error": "DATABASE_URL not set"}
-    
+
     db_client = DBClient(dsn)
 
     original_sql = state.get("original_sql")
@@ -230,15 +277,47 @@ def run_explain_node(state: AgentState):
     if not original_sql:
         return {"error": "No Original SQL found"}
 
-    sql_to_explain = state.get("normalized_sql") or original_sql
+    sql_to_explain = state.get("rewritten_sql") or state.get("normalized_sql") or original_sql
+
+    # Extract table names up front so we can do PK check before EXPLAIN
+    table_names = list(set(re.findall(
+        r'(?:FROM|JOIN|,)\s+([a-zA-Z_][a-zA-Z0-9_]*)', sql_to_explain, re.IGNORECASE
+    )))
+
+    # Ensure every PK column has an index before running EXPLAIN — a production DB
+    # should always have this, but benchmark or newly restored databases often don't.
+    try:
+        pk_conn = psycopg2.connect(dsn)
+        with pk_conn.cursor() as cur:
+            cur.execute("""
+                SELECT tc.table_name, kcu.column_name
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                    ON tc.constraint_name = kcu.constraint_name
+                    AND tc.table_schema = kcu.table_schema
+                WHERE tc.constraint_type = 'PRIMARY KEY'
+                  AND tc.table_schema = 'public'
+                  AND tc.table_name = ANY(%s)
+            """, (table_names,))
+            pk_cols = cur.fetchall()
+            for table, col in pk_cols:
+                cur.execute("""
+                    SELECT 1 FROM pg_indexes
+                    WHERE schemaname = 'public' AND tablename = %s
+                      AND indexdef LIKE %s
+                    LIMIT 1
+                """, (table, f'%({col}%'))
+                if not cur.fetchone():
+                    cur.execute(
+                        f"CREATE INDEX IF NOT EXISTS pk_idx_{table}_{col} ON {table}({col})"
+                    )
+        pk_conn.commit()
+        pk_conn.close()
+    except Exception:
+        pass  # PK index check is best-effort; don't block the workflow
 
     try:
         plan = db_client.execute_explain(sql_to_explain)
-
-        # Enrich DDL with existing index information
-        table_names = list(set(re.findall(
-            r'(?:FROM|JOIN|,)\s+([a-zA-Z_][a-zA-Z0-9_]*)', sql_to_explain, re.IGNORECASE
-        )))
         enriched_ddl = state.get("ddl") or ""
         try:
             idx_conn = psycopg2.connect(dsn)

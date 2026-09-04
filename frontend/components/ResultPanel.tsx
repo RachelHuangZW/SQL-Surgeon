@@ -108,6 +108,19 @@ export default function ResultPanel({ result, loading, error }: Props) {
         </div>
       )}
 
+      {result.rewrite_warnings && result.rewrite_warnings.length > 0 && (
+        <Section title={<>⚡ SQL Anti-patterns <span className="text-slate-500 font-normal normal-case">({result.rewrite_warnings.length})</span></>} color="text-blue-400">
+          <ul className="flex flex-col gap-2">
+            {result.rewrite_warnings.map((warning, i) => (
+              <li key={i} className="flex gap-3 text-sm text-slate-300 bg-slate-900 rounded-lg p-3 border border-slate-800">
+                <span className="text-blue-400/70 shrink-0 mt-0.5">ℹ</span>
+                <span className="leading-relaxed">{warning}</span>
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
+
       {result.issues.length > 0 && (
         <Section title={<>⚠ Issues Found <span className="text-slate-500 font-normal normal-case">({result.issues.length})</span></>} color="text-amber-400">
           <ul className="flex flex-col gap-2">

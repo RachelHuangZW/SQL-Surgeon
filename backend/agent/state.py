@@ -18,6 +18,8 @@ class AgentState(TypedDict):
     seq_scan_analyses: Optional[List[dict]]
     normalized_sql: Optional[str]
     filtered_indexes: Optional[List[dict]]
+    rewritten_sql: Optional[str]
+    rewrite_warnings: Optional[List[str]]
 
 
 

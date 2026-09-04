@@ -26,6 +26,7 @@ class DiagnoseRequest(BaseModel):
 
 class DiagnoseResponse(BaseModel):
     status: str
+    rewrite_warnings: Optional[List[str]]
     explain_output: Optional[List[dict]]
     issues: List[str]
     advice: Optional[List[str]]
@@ -54,9 +55,12 @@ async def diagnose_sql(request: DiagnoseRequest):
         if final_state.get("error"):
             return DiagnoseResponse(
                 status = "failed",
+                rewrite_warnings = None,
                 explain_output = None,
                 issues = final_state.get("issues", []),
                 advice = None,
+                filtered_indexes = None,
+                execution_time_ms = None,
                 benchmark_result = None,
                 optimized_sql = None,
                 error = final_state["error"]
@@ -64,6 +68,7 @@ async def diagnose_sql(request: DiagnoseRequest):
         
         return DiagnoseResponse(
             status = "success",
+            rewrite_warnings = final_state.get("rewrite_warnings"),
             explain_output = final_state.get("explain_output"),
             issues = final_state.get("issues", []),
             advice = final_state.get("advice"),

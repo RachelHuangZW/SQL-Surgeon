@@ -287,6 +287,29 @@ def extract_index_columns(ddls: list) -> set:
     return result
 
 
+def filter_already_indexed(conn, ddls: list) -> list:
+    # Remove DDLs whose (table, leading_col) is already covered by a real index.
+    # This prevents oracle's redundant PK-on-top-of-pkey recommendations from
+    # inflating the oracle set and unfairly penalising our recall.
+    result = []
+    with conn.cursor() as cur:
+        for ddl in ddls:
+            m = re.search(r'\bON\s+(\w+)\s*\((\w+)', ddl, re.IGNORECASE)
+            if not m:
+                result.append(ddl)
+                continue
+            table, col = m.group(1).lower(), m.group(2).lower()
+            cur.execute("""
+                SELECT 1 FROM pg_indexes
+                WHERE schemaname = 'public' AND tablename = %s
+                  AND indexdef LIKE %s
+                LIMIT 1
+            """, (table, f'%({col}%'))
+            if not cur.fetchone():
+                result.append(ddl)
+    return result
+
+
 def compute_l2_metrics(surgeon_ddls: list, oracle_ddls: list) -> dict:
     # Returns precision, recall, f1, and matched columns for L2 index quality evaluation.
     surgeon_set = extract_index_columns(surgeon_ddls)
@@ -503,8 +526,10 @@ def main():
                     surgeon_gin_cost, surgeon_gin_adopted = eval_surgeon_gin(conn, sql, gin_ddls)
                 if btree_ddls or gin_ddls:
                     surgeon_combined_cost = evaluate_surgeon_combined(conn, sql, btree_ddls, gin_ddls)
-                l2_btree    = compute_l2_metrics(btree_ddls, b2_btree_indexes)
-                l2_combined = compute_l2_metrics(btree_ddls + gin_ddls, b2_combined_btree_indexes + b2_combined_gin_indexes)
+                filtered_b2_btree    = filter_already_indexed(conn, b2_btree_indexes)
+                filtered_b2_combined = filter_already_indexed(conn, b2_combined_btree_indexes + b2_combined_gin_indexes)
+                l2_btree    = compute_l2_metrics(btree_ddls, filtered_b2_btree)
+                l2_combined = compute_l2_metrics(btree_ddls + gin_ddls, filtered_b2_combined)
 
             elapsed = round(time.time() - query_start, 1)
             _, peak = tracemalloc.get_traced_memory()

@@ -10,7 +10,19 @@
       "Bash(mkdir -p ~/.claude/skills/grill-me)",
       "Bash(curl -s -o ~/.claude/skills/grill-me/SKILL.md https://raw.githubusercontent.com/mattpocock/skills/main/skills/productivity/grill-me/SKILL.md)",
       "Bash(mkdir -p ~/.claude/skills/grilling)",
-      "Bash(curl -s -o ~/.claude/skills/grilling/SKILL.md https://raw.githubusercontent.com/mattpocock/skills/main/skills/productivity/grilling/SKILL.md)"
+      "Bash(curl -s -o ~/.claude/skills/grilling/SKILL.md https://raw.githubusercontent.com/mattpocock/skills/main/skills/productivity/grilling/SKILL.md)",
+      "Bash(python3 -c \"import ndlib; print\\(ndlib.__file__\\)\")",
+      "Bash(find / -iname \"ThresholdModel.py\")",
+      "WebFetch(domain:ndlib.readthedocs.io)",
+      "Bash(python3 -c \"import ndlib\")",
+      "Bash(python3 -c \"import mads\")",
+      "Bash(python3 -c \"import networkx as nx; print\\(nx.__version__\\)\")",
+      "Bash(python3 -m venv nbenv)",
+      "Bash(./nbenv/bin/pip install *)",
+      "Bash(./nbenv/bin/python3 -c ' *)",
+      "Bash(./nbenv/bin/python3 verify_q2_q3.py)",
+      "Bash(./nbenv/bin/python3 verify_q6_q7.py)",
+      "Bash(./nbenv/bin/python3 verify_q7.py)"
     ]
   }
 }

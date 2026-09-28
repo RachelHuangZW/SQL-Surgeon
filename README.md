@@ -26,7 +26,7 @@ run_explain → identify_issue → generate_advice → review_advice
 
 | Node | What it does |
 |------|-------------|
-| `run_explain` | Connects to PostgreSQL, runs `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)`, rolls back (no side effects) |
+| `run_explain` | Runs `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` in a read-only, time-limited transaction on the least-privilege connection, then rolls back (see [Security](#security)) |
 | `identify_issue` | LLM reads the execution plan + DDL, returns a list of specific bottlenecks |
 | `generate_advice` | LLM produces concrete recommendations + a two-step executable script (CREATE INDEX + optimized query). If `review_advice` returned feedback from a prior retry, that feedback is injected into this prompt so the LLM directly addresses the reviewer's criticisms. |
 | `review_advice` | LLM acts as a senior DBA reviewer — returns `pass` or `retry` with feedback |
@@ -355,7 +355,8 @@ SQL-Surgeon/
 │   ├── api/
 │   │   └── main.py         # FastAPI app — /api/diagnose + /api/health
 │   ├── db/
-│   │   └── client.py       # DBClient: execute_explain + benchmark_in_sandbox
+│   │   ├── client.py       # DBClient: execute_explain (hardened) + benchmark_in_sandbox
+│   │   └── config.py       # Security settings from env (read-only DSN, timeouts, pool size)
 │   ├── eval/
 │   │   ├── run_eval.py     # Eval harness: B1/B2/combined baselines + surgeon metrics
 │   │   ├── summarize.py    # Per-run summary table + aggregate stats
@@ -375,6 +376,8 @@ SQL-Surgeon/
 │   ├── eval_design.md
 │   ├── timeout_design.md   # Three-layer timeout design rationale
 │   └── pg_index_types.md
+├── scripts/
+│   └── setup_security_role.sql  # Creates the sql_surgeon_readonly role
 ├── requirements.txt
 └── .env                    # DATABASE_URL + GOOGLE_API_KEY (not committed)
 ```
@@ -404,6 +407,9 @@ cd frontend && npm install
 ```env
 DATABASE_URL=postgresql://user:password@localhost:5432/yourdb
 GOOGLE_API_KEY=your_gemini_api_key
+
+# Recommended: least-privilege connection for running user SQL (see Security)
+SURGEON_READONLY_DATABASE_URL=postgresql://sql_surgeon_readonly:password@localhost:5432/yourdb
 ```
 
 ### 3. Run
@@ -468,6 +474,81 @@ When `run_benchmark: true`, `benchmark_result` contains an `EXPLAIN ANALYZE` res
 ```json
 { "status": "healthy", "engine": "SQL-Surgeon backend is running" }
 ```
+
+---
+
+## Security
+
+`EXPLAIN ANALYZE` **really executes** the query it analyzes, and in SQL Surgeon that query comes from the user. Treat every input as untrusted SQL running against your database.
+
+### Defense in depth
+
+User SQL goes through `DBClient.execute_explain` ([backend/db/client.py](backend/db/client.py)). It has to pass several independent layers, so a gap in one is caught by the next:
+
+| # | Layer | What it stops |
+|---|-------|---------------|
+| 1 | **Single-statement check**: a quote/comment/dollar-quote aware scanner rejects input with more than one statement | `SELECT 1; COMMIT; DROP TABLE t`. psycopg2 uses PostgreSQL's simple query protocol, which runs multiple statements, and a `COMMIT` would end the read-only transaction before the `DROP`. |
+| 2 | **Query-only allowlist**: only `SELECT`, `WITH`, `VALUES`, and `TABLE` are accepted | `EXPLAIN ANALYZE CREATE TABLE AS …` / `CREATE MATERIALIZED VIEW …`, which PostgreSQL (verified on 17) does **not** block inside a read-only transaction |
+| 3 | **Read-only transaction**: `SET TRANSACTION READ ONLY` before the user SQL runs | `INSERT`/`UPDATE`/`DELETE` in data-modifying CTEs (`WITH d AS (DELETE …) SELECT …`), `nextval()`, DDL |
+| 4 | **`statement_timeout` + `lock_timeout`**: `SET LOCAL`, default 5000 ms / 2000 ms | Slow queries, `pg_sleep()`, and lock waits tying up connections (DoS) |
+| 5 | **Always roll back + reset**: `ROLLBACK` then `DISCARD ALL` before the connection returns to the pool; broken connections are closed, not reused | Leftover effects, session state such as advisory locks (which survive `ROLLBACK`), and connection leaks |
+| 6 | **Least-privilege role** `sql_surgeon_readonly`: `SELECT` only, no `CREATE`, no server-file or signal roles | Everything above, if a layer is bypassed. Also covers anyone who gets these credentials and connects directly. |
+
+Connections come from a bounded `ThreadedConnectionPool` (`SURGEON_DB_POOL_MAX`), so concurrent requests can't open unlimited backends.
+
+### Configuration
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `SURGEON_READONLY_DATABASE_URL` | *(falls back to `DATABASE_URL` with a warning)* | Connection used for user SQL. Point it at `sql_surgeon_readonly`. |
+| `SURGEON_STATEMENT_TIMEOUT_MS` | `5000` | Maximum run time of one analyzed query |
+| `SURGEON_LOCK_TIMEOUT_MS` | `2000` | Maximum wait for a lock |
+| `SURGEON_DB_POOL_MIN` / `SURGEON_DB_POOL_MAX` | `1` / `10` | Pool bounds for the read-only connection |
+
+> **Note:** 5 s is too short for many JOB queries on the full 12M-row IMDb dataset. For the eval harness, raise it, e.g. `SURGEON_STATEMENT_TIMEOUT_MS=120000 python -m eval.run_eval`.
+
+### Setting up the restricted role
+
+Run [scripts/setup_security_role.sql](scripts/setup_security_role.sql) once per database, as a superuser or the database owner:
+
+```bash
+psql "$ADMIN_DATABASE_URL" \
+     -v ro_password='a-strong-password' \
+     -f scripts/setup_security_role.sql
+```
+
+The script is idempotent and ends by printing a verification row (expected `t | f | f | f | f`). It:
+
+- creates `sql_surgeon_readonly` with `LOGIN` only (`NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, connection limit 20);
+- grants `CONNECT`, `USAGE` on `public`, and `SELECT` on existing and future tables in `public`, and revokes every other table and sequence privilege;
+- removes membership in `pg_write_all_data`, `pg_read_server_files`, `pg_write_server_files`, `pg_execute_server_program`, `pg_signal_backend`, and `pg_checkpoint`;
+- sets role defaults as a backstop: `default_transaction_read_only = on`, `statement_timeout = 5s`, `lock_timeout = 2s`, `idle_in_transaction_session_timeout = 30s`.
+
+Optional flags:
+
+| Flag | Effect |
+|------|--------|
+| `-v owner_role=<role>` | Role that creates future tables (default: the role running the script). Future-table grants only apply to objects this role creates. |
+| `-v all_schemas=on` | Also grant `SELECT` on future schemas and tables DB-wide, not only `public` |
+| `-v revoke_from_public=on` | Revoke `dblink*` function `EXECUTE` from `PUBLIC`. dblink can open a second connection and write through it. Because a per-role `REVOKE` can't remove a `PUBLIC` grant, this is the only way to block it. It affects every role, so it's opt-in. |
+
+Then set `SURGEON_READONLY_DATABASE_URL` to the new role and restart the backend. If the `WARNING: SURGEON_READONLY_DATABASE_URL not set` log line no longer appears, the backend is using it.
+
+### What is *not* covered by the read-only path
+
+Two features still use the privileged `DATABASE_URL` because they need to write:
+
+- **`run_benchmark: true`** (`benchmark_in_sandbox`) creates a schema, copies data, and executes the **LLM-generated** `optimized_sql`. A prompt-injected query could steer that DDL, so leave `run_benchmark` off for untrusted users, or point `DATABASE_URL` at a disposable replica.
+- **`run_explain`'s PK index check** can run `CREATE INDEX` on your tables when a primary-key column has no index.
+
+### Production checklist
+
+- **Never** point `DATABASE_URL` or `SURGEON_READONLY_DATABASE_URL` at a primary with real customer data. Use a read replica or a restored snapshot. `EXPLAIN ANALYZE` consumes real CPU and I/O.
+- Always set `SURGEON_READONLY_DATABASE_URL`. The fallback keeps layers 1–5 but loses role isolation.
+- Keep `SURGEON_STATEMENT_TIMEOUT_MS` as low as your workload allows, and size `SURGEON_DB_POOL_MAX` below the role's `CONNECTION LIMIT`.
+- Restrict the API: CORS is currently `allow_origins=["*"]` and there is no authentication. Put the backend behind auth and rate limiting before exposing it.
+- Require TLS (`?sslmode=require` or stricter) for remote databases, and keep credentials in a secrets manager, not in `.env` on shared hosts.
+- Monitor sessions with `application_name = 'sql_surgeon_readonly'` in `pg_stat_activity`.
 
 ---
 

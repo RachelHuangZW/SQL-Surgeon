@@ -17,22 +17,20 @@ load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-2.5-pro",
-    google_api_key=api_key,
-    temperature=0.0,
-    timeout=60
+    model="gemini-2.5-pro", google_api_key=api_key, temperature=0.0, timeout=60
 )
+
 
 def _parse_from_tables(from_clause: str) -> list:
     """Return [(alias, table_name), ...] preserving original case."""
     entries = []
-    for entry in from_clause.split(','):
-        entry = re.sub(r'\s+', ' ', entry).strip()
-        m = re.match(r'(\w+)\s+(?:AS\s+)?(\w+)\s*$', entry, re.IGNORECASE)
+    for entry in from_clause.split(","):
+        entry = re.sub(r"\s+", " ", entry).strip()
+        m = re.match(r"(\w+)\s+(?:AS\s+)?(\w+)\s*$", entry, re.IGNORECASE)
         if m:
             entries.append((m.group(2), m.group(1)))  # (alias, table_name)
         else:
-            m2 = re.match(r'^(\w+)$', entry)
+            m2 = re.match(r"^(\w+)$", entry)
             if m2:
                 entries.append((m2.group(1), m2.group(1)))
     return entries
@@ -44,13 +42,15 @@ def _split_and_conditions(clause: str) -> list:
     upper = clause.upper()
     i = 0
     while i < len(clause):
-        if clause[i] == '(':
+        if clause[i] == "(":
             depth += 1
-        elif clause[i] == ')':
+        elif clause[i] == ")":
             depth -= 1
-        elif depth == 0 and upper[i:i+3] == 'AND':
-            before_ok = i == 0 or not clause[i-1].isalnum() and clause[i-1] != '_'
-            after_ok  = i+3 >= len(clause) or (not clause[i+3].isalnum() and clause[i+3] != '_')
+        elif depth == 0 and upper[i : i + 3] == "AND":
+            before_ok = i == 0 or not clause[i - 1].isalnum() and clause[i - 1] != "_"
+            after_ok = i + 3 >= len(clause) or (
+                not clause[i + 3].isalnum() and clause[i + 3] != "_"
+            )
             if before_ok and after_ok:
                 parts.append(clause[start:i].strip())
                 i += 3
@@ -65,15 +65,15 @@ def rewrite_comma_join(sql: str) -> str:
     """Convert comma-style implicit joins to explicit JOIN syntax.
     Returns original SQL unchanged if no comma-join pattern is detected or rewrite fails.
     """
-    s = re.sub(r'[ \t]+', ' ', sql).strip()
+    s = re.sub(r"[ \t]+", " ", sql).strip()
 
-    m_from  = re.search(r'\bFROM\b',  s, re.IGNORECASE)
-    m_where = re.search(r'\bWHERE\b', s, re.IGNORECASE)
+    m_from = re.search(r"\bFROM\b", s, re.IGNORECASE)
+    m_where = re.search(r"\bWHERE\b", s, re.IGNORECASE)
     if not m_from or not m_where or m_from.start() > m_where.start():
         return sql
 
-    from_clause = s[m_from.end():m_where.start()].strip()
-    if ',' not in from_clause:
+    from_clause = s[m_from.end() : m_where.start()].strip()
+    if "," not in from_clause:
         return sql
 
     table_entries = _parse_from_tables(from_clause)
@@ -83,27 +83,31 @@ def rewrite_comma_join(sql: str) -> str:
     alias_map = {alias.lower(): (alias, tname) for alias, tname in table_entries}
     all_aliases = set(alias_map.keys())
 
-    rest = s[m_where.end():].strip()
+    rest = s[m_where.end() :].strip()
     trailing_m = re.search(
-        r'\b(GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|UNION)\b', rest, re.IGNORECASE
+        r"\b(GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|UNION)\b", rest, re.IGNORECASE
     )
     if trailing_m:
-        where_str = rest[:trailing_m.start()].rstrip()
-        trailing  = '\n' + rest[trailing_m.start():]
+        where_str = rest[: trailing_m.start()].rstrip()
+        trailing = "\n" + rest[trailing_m.start() :]
     else:
-        trailing  = ';' if rest.rstrip().endswith(';') else ''
-        where_str = rest.rstrip(';').strip()
+        trailing = ";" if rest.rstrip().endswith(";") else ""
+        where_str = rest.rstrip(";").strip()
 
-    conditions   = _split_and_conditions(where_str)
-    join_graph   = {}
+    conditions = _split_and_conditions(where_str)
+    join_graph = {}
     filter_conds = []
-    join_pat     = re.compile(r'^(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)$', re.IGNORECASE)
+    join_pat = re.compile(r"^(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)$", re.IGNORECASE)
 
     for cond in conditions:
         mc = join_pat.match(cond.strip())
         if mc:
             a1, _, a2, _ = mc.groups()
-            if a1.lower() in all_aliases and a2.lower() in all_aliases and a1.lower() != a2.lower():
+            if (
+                a1.lower() in all_aliases
+                and a2.lower() in all_aliases
+                and a1.lower() != a2.lower()
+            ):
                 key = tuple(sorted([a1.lower(), a2.lower()]))
                 join_graph.setdefault(key, []).append(cond.strip())
                 continue
@@ -111,7 +115,7 @@ def rewrite_comma_join(sql: str) -> str:
 
     # BFS to build JOIN chain
     first_alias_lower = table_entries[0][0].lower()
-    joined    = {first_alias_lower}
+    joined = {first_alias_lower}
     remaining = {e[0].lower() for e in table_entries[1:]}
     join_clauses = []
 
@@ -123,9 +127,13 @@ def rewrite_comma_join(sql: str) -> str:
             for jl in list(joined):
                 key = tuple(sorted([al, jl]))
                 if key in join_graph:
-                    on_clause = ' AND '.join(join_graph[key])
+                    on_clause = " AND ".join(join_graph[key])
                     orig_alias, tname = alias_map[al]
-                    clause = f'JOIN {tname} AS {orig_alias} ON {on_clause}' if orig_alias.lower() != tname.lower() else f'JOIN {tname} ON {on_clause}'
+                    clause = (
+                        f"JOIN {tname} AS {orig_alias} ON {on_clause}"
+                        if orig_alias.lower() != tname.lower()
+                        else f"JOIN {tname} ON {on_clause}"
+                    )
                     join_clauses.append(clause)
                     joined.add(al)
                     remaining.discard(al)
@@ -137,15 +145,19 @@ def rewrite_comma_join(sql: str) -> str:
     if remaining:
         return sql
 
-    select_part = s[:m_from.start()].strip()
+    select_part = s[: m_from.start()].strip()
     orig_first_alias, first_tname = alias_map[first_alias_lower]
-    from_part = f'FROM {first_tname} AS {orig_first_alias}' if orig_first_alias.lower() != first_tname.lower() else f'FROM {first_tname}'
+    from_part = (
+        f"FROM {first_tname} AS {orig_first_alias}"
+        if orig_first_alias.lower() != first_tname.lower()
+        else f"FROM {first_tname}"
+    )
 
     lines = [select_part, from_part] + join_clauses
     if filter_conds:
-        lines.append('WHERE ' + '\n  AND '.join(filter_conds))
+        lines.append("WHERE " + "\n  AND ".join(filter_conds))
 
-    return '\n'.join(lines) + trailing
+    return "\n".join(lines) + trailing
 
 
 def preprocess_sql_node(state: AgentState):
@@ -162,14 +174,14 @@ def rewrite_sql_node(state: AgentState):
     warnings = []
 
     # Warn: SELECT * — downstream consumer unknown, can't safely pick columns
-    if re.search(r'\bSELECT\s+\*', rewritten, re.IGNORECASE):
+    if re.search(r"\bSELECT\s+\*", rewritten, re.IGNORECASE):
         warnings.append(
             "SELECT * detected — list only the columns your application needs "
             "to reduce I/O and enable index-only scans"
         )
 
     # Warn: correlated EXISTS/NOT EXISTS subquery
-    if re.search(r'\b(?:NOT\s+)?EXISTS\s*\(\s*SELECT', rewritten, re.IGNORECASE):
+    if re.search(r"\b(?:NOT\s+)?EXISTS\s*\(\s*SELECT", rewritten, re.IGNORECASE):
         warnings.append(
             "EXISTS subquery detected — PostgreSQL usually unnests these automatically; "
             "if cost is still high, consider rewriting as a JOIN"
@@ -177,19 +189,27 @@ def rewrite_sql_node(state: AgentState):
 
     # Rewrite: DISTINCT where GROUP BY already guarantees uniqueness
     distinct_m = re.search(
-        r'SELECT\s+DISTINCT\s+([\w\s,\.]+?)\s+FROM', rewritten, re.IGNORECASE
+        r"SELECT\s+DISTINCT\s+([\w\s,\.]+?)\s+FROM", rewritten, re.IGNORECASE
     )
     groupby_m = re.search(
-        r'\bGROUP\s+BY\s+([\w\s,\.]+?)(?:\s+(?:HAVING|ORDER|LIMIT|UNION|$))',
-        rewritten, re.IGNORECASE | re.DOTALL
+        r"\bGROUP\s+BY\s+([\w\s,\.]+?)(?:\s+(?:HAVING|ORDER|LIMIT|UNION|$))",
+        rewritten,
+        re.IGNORECASE | re.DOTALL,
     )
     if distinct_m and groupby_m:
-        sel_cols = {c.strip().lower().split('.')[-1] for c in distinct_m.group(1).split(',')}
-        grp_cols = {c.strip().lower().split('.')[-1] for c in groupby_m.group(1).split(',')}
+        sel_cols = {
+            c.strip().lower().split(".")[-1] for c in distinct_m.group(1).split(",")
+        }
+        grp_cols = {
+            c.strip().lower().split(".")[-1] for c in groupby_m.group(1).split(",")
+        }
         if sel_cols and sel_cols == grp_cols:
             rewritten = re.sub(
-                r'\bSELECT\s+DISTINCT\b', 'SELECT', rewritten,
-                count=1, flags=re.IGNORECASE
+                r"\bSELECT\s+DISTINCT\b",
+                "SELECT",
+                rewritten,
+                count=1,
+                flags=re.IGNORECASE,
             )
             rewrites_applied.append(
                 "Removed redundant DISTINCT — GROUP BY already guarantees uniqueness"
@@ -199,7 +219,7 @@ def rewrite_sql_node(state: AgentState):
         "rewritten_sql": rewritten if rewrites_applied else None,
         "rewrite_warnings": warnings,
     }
-    
+
 
 def _traverse_plan(node: dict, results: list):
     if node.get("Node Type") == "Seq Scan":
@@ -214,12 +234,14 @@ def _traverse_plan(node: dict, results: list):
                 verdict = "index_likely_helpful"
             else:
                 verdict = "gray_zone"
-            results.append({
-                "table": node.get("Relation Name", "unknown"),
-                "selectivity": round(selectivity, 3),
-                "absolute_rows": actual_rows,
-                "verdict": verdict
-            })
+            results.append(
+                {
+                    "table": node.get("Relation Name", "unknown"),
+                    "selectivity": round(selectivity, 3),
+                    "absolute_rows": actual_rows,
+                    "verdict": verdict,
+                }
+            )
     for child in node.get("Plans", []):
         _traverse_plan(child, results)
 
@@ -241,8 +263,8 @@ def strip_code_block(text: str) -> str:
 
 
 EXTENSION_DEPS = {
-    r'\bgin_trgm_ops\b': "CREATE EXTENSION IF NOT EXISTS pg_trgm;",
-    r'\bbtree_gin\b':    "CREATE EXTENSION IF NOT EXISTS btree_gin;",
+    r"\bgin_trgm_ops\b": "CREATE EXTENSION IF NOT EXISTS pg_trgm;",
+    r"\bbtree_gin\b": "CREATE EXTENSION IF NOT EXISTS btree_gin;",
 }
 
 
@@ -259,14 +281,19 @@ def inject_extension_deps(optimized_sql: str) -> str:
     idx = optimized_sql.find(marker)
     if idx != -1:
         line_end = optimized_sql.find("\n", idx) + 1
-        return optimized_sql[:line_end] + "\n".join(needed) + "\n" + optimized_sql[line_end:]
+        return (
+            optimized_sql[:line_end]
+            + "\n".join(needed)
+            + "\n"
+            + optimized_sql[line_end:]
+        )
 
     return "\n".join(needed) + "\n" + optimized_sql
 
 
 def run_explain_node(state: AgentState):
     # Node 1: Execute EXPLAIN ANALYZE
-    dsn = os.getenv("DATABASE_URL")
+    dsn = os.getenv("SURGEON_READONLY_DATABASE_URL")
     if not dsn:
         return {"error": "DATABASE_URL not set"}
 
@@ -277,44 +304,57 @@ def run_explain_node(state: AgentState):
     if not original_sql:
         return {"error": "No Original SQL found"}
 
-    sql_to_explain = state.get("rewritten_sql") or state.get("normalized_sql") or original_sql
+    sql_to_explain = (
+        state.get("rewritten_sql") or state.get("normalized_sql") or original_sql
+    )
 
     # Extract table names up front so we can do PK check before EXPLAIN
-    table_names = list(set(re.findall(
-        r'(?:FROM|JOIN|,)\s+([a-zA-Z_][a-zA-Z0-9_]*)', sql_to_explain, re.IGNORECASE
-    )))
+    table_names = list(
+        set(
+            re.findall(
+                r"(?:FROM|JOIN|,)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+                sql_to_explain,
+                re.IGNORECASE,
+            )
+        )
+    )
 
     # Ensure every PK column has an index before running EXPLAIN — a production DB
     # should always have this, but benchmark or newly restored databases often don't.
     try:
         pk_conn = psycopg2.connect(dsn)
         with pk_conn.cursor() as cur:
-            cur.execute("""
-                SELECT tc.table_name, kcu.column_name
-                FROM information_schema.table_constraints tc
-                JOIN information_schema.key_column_usage kcu
-                    ON tc.constraint_name = kcu.constraint_name
-                    AND tc.table_schema = kcu.table_schema
-                WHERE tc.constraint_type = 'PRIMARY KEY'
-                  AND tc.table_schema = 'public'
-                  AND tc.table_name = ANY(%s)
-            """, (table_names,))
+            cur.execute(
+                """
+                    SELECT c.relname AS table_name, a.attname AS column_name
+FROM pg_constraint con
+JOIN pg_class c     ON c.oid = con.conrelid          -- 表 OID → 表名
+JOIN pg_namespace n ON n.oid = c.relnamespace        -- → schema 名
+CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)  -- 数组拆成多行
+JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum -- 列号 → 列名
+WHERE con.contype = 'p'
+  AND n.nspname = 'public'
+  AND c.relname = ANY(%s)
+ORDER BY k.ord;
+            """,
+                (table_names,),
+            )
             pk_cols = cur.fetchall()
             for table, col in pk_cols:
-                cur.execute("""
+                cur.execute(
+                    """
                     SELECT 1 FROM pg_indexes
                     WHERE schemaname = 'public' AND tablename = %s
                       AND indexdef LIKE %s
                     LIMIT 1
-                """, (table, f'%({col}%'))
+                """,
+                    (table, f"%({col}%"),
+                )
                 if not cur.fetchone():
-                    cur.execute(
-                        f"CREATE INDEX IF NOT EXISTS pk_idx_{table}_{col} ON {table}({col})"
-                    )
+                    print()
         pk_conn.commit()
+    finally:
         pk_conn.close()
-    except Exception:
-        pass  # PK index check is best-effort; don't block the workflow
 
     try:
         plan = db_client.execute_explain(sql_to_explain)
@@ -325,92 +365,114 @@ def run_explain_node(state: AgentState):
                 # Auto-fetch column definitions if user didn't provide DDL
                 if not enriched_ddl.strip():
                     for table in table_names:
-                        cur.execute("""
+                        cur.execute(
+                            """
                             SELECT column_name, data_type
                             FROM information_schema.columns
                             WHERE table_schema = 'public' AND table_name = %s
                             ORDER BY ordinal_position
-                        """, (table,))
+                        """,
+                            (table,),
+                        )
                         cols = cur.fetchall()
                         if cols:
-                            col_defs = ", ".join(f"{name} {dtype}" for name, dtype in cols)
+                            col_defs = ", ".join(
+                                f"{name} {dtype}" for name, dtype in cols
+                            )
                             enriched_ddl += f"CREATE TABLE {table} ({col_defs});\n"
                 # Always append existing index information
                 for table in table_names:
-                    cur.execute("""
+                    cur.execute(
+                        """
                         SELECT indexname, indexdef FROM pg_indexes
                         WHERE schemaname = 'public' AND tablename = %s
-                    """, (table,))
+                    """,
+                        (table,),
+                    )
                     indexes = cur.fetchall()
                     if indexes:
-                        lines = "\n".join(f"--   {name}: {defn}" for name, defn in indexes)
+                        lines = "\n".join(
+                            f"--   {name}: {defn}" for name, defn in indexes
+                        )
                         enriched_ddl += f"\n-- Existing indexes on {table}:\n{lines}"
                     else:
                         enriched_ddl += f"\n-- Existing indexes on {table}: NONE"
+        finally:
             idx_conn.close()
-        except Exception:
-            pass  # DDL enrichment is best-effort; don't fail the whole workflow
 
         return {
             "explain_output": plan,
             "ddl": enriched_ddl,
             "seq_scan_analyses": compute_seq_scan_analysis(plan),
-            "error": None
+            "error": None,
         }
     except Exception as e:
-        return {
-            "error": f"Database Execution Failure: {str(e)}"
-        }
+        return {"error": f"Database Execution Failure: {str(e)}"}
 
 
 def identify_issues(state: AgentState):
     # Node 2: use LLM to identify DB issues from EXPLAIN PLAN
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", ANALYSIS_PROMPT),
-        ("user", "DDL: {ddl}\nExecution_Plan: {execution_plan}\nSeq Scan Analysis: {seq_scan_analyses}\nPrevious feedback: {feedback}")
-    ])
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", ANALYSIS_PROMPT),
+            (
+                "user",
+                "DDL: {ddl}\nExecution_Plan: {execution_plan}\nSeq Scan Analysis: {seq_scan_analyses}\nPrevious feedback: {feedback}",
+            ),
+        ]
+    )
 
     chain = prompt | llm
 
-    response = chain.invoke({
-        "ddl": state.get("ddl"),
-        "execution_plan": state.get("explain_output"),
-        "seq_scan_analyses": state.get("seq_scan_analyses") or [],
-        "feedback": state.get("feedback") or "None"
-    })
+    response = chain.invoke(
+        {
+            "ddl": state.get("ddl"),
+            "execution_plan": state.get("explain_output"),
+            "seq_scan_analyses": state.get("seq_scan_analyses") or [],
+            "feedback": state.get("feedback") or "None",
+        }
+    )
 
-    usage = getattr(response, 'usage_metadata', None) or {}
-    _in  = usage.get('input_tokens', 0)
-    _out = usage.get('output_tokens', 0)
-    
+    usage = getattr(response, "usage_metadata", None) or {}
+    _in = usage.get("input_tokens", 0)
+    _out = usage.get("output_tokens", 0)
+
     try:
         issues = json.loads(strip_code_block(response.content))
-        return {"issues": issues,
-                "total_input_tokens":  (state.get("total_input_tokens")  or 0) + _in,
-                "total_output_tokens": (state.get("total_output_tokens") or 0) + _out
-            }
+        return {
+            "issues": issues,
+            "total_input_tokens": (state.get("total_input_tokens") or 0) + _in,
+            "total_output_tokens": (state.get("total_output_tokens") or 0) + _out,
+        }
     except json.JSONDecodeError:
         return {"error": f"LLM returned unparseable response: {response.content}"}
 
 
 def generate_advice(state: AgentState):
     # Node 3: generate advice based on issues found
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", ADVICE_PROMPT),
-        ("user", "SQL: {original_sql}\nIssues: {issues}\nPrevious review feedback: {feedback}")
-    ])
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", ADVICE_PROMPT),
+            (
+                "user",
+                "SQL: {original_sql}\nIssues: {issues}\nPrevious review feedback: {feedback}",
+            ),
+        ]
+    )
 
     chain = prompt | llm
 
-    response = chain.invoke({
-        "original_sql": state.get("normalized_sql") or state.get("original_sql"),
-        "issues": state.get("issues"),
-        "feedback": state.get("feedback") or "None"
-    })
+    response = chain.invoke(
+        {
+            "original_sql": state.get("normalized_sql") or state.get("original_sql"),
+            "issues": state.get("issues"),
+            "feedback": state.get("feedback") or "None",
+        }
+    )
 
-    usage = getattr(response, 'usage_metadata', None) or {}
-    _in  = usage.get('input_tokens', 0)
-    _out = usage.get('output_tokens', 0)
+    usage = getattr(response, "usage_metadata", None) or {}
+    _in = usage.get("input_tokens", 0)
+    _out = usage.get("output_tokens", 0)
 
     try:
         result = json.loads(strip_code_block(response.content))
@@ -418,8 +480,8 @@ def generate_advice(state: AgentState):
             "advice": result["advice"],
             "filtered_indexes": result["indexes"],
             "optimized_sql": inject_extension_deps(result["optimized_sql"]),
-            "total_input_tokens":  (state.get("total_input_tokens")  or 0) + _in,
-            "total_output_tokens": (state.get("total_output_tokens") or 0) + _out
+            "total_input_tokens": (state.get("total_input_tokens") or 0) + _in,
+            "total_output_tokens": (state.get("total_output_tokens") or 0) + _out,
         }
     except (json.JSONDecodeError, KeyError) as e:
         return {"error": f"LLM returned unparseable response: {response.content}"}
@@ -428,46 +490,59 @@ def generate_advice(state: AgentState):
 def _build_analyze_statement(filtered_indexes: list) -> str:
     # Extract unique table names from filtered index DDLs
     tables = []
-    for idx in (filtered_indexes or []):
-        m = re.search(r'\bON\s+(\w+)\s*\(', idx.get("ddl", ""), re.IGNORECASE)
+    for idx in filtered_indexes or []:
+        m = re.search(r"\bON\s+(\w+)\s*\(", idx.get("ddl", ""), re.IGNORECASE)
         if m:
             t = m.group(1).lower()
             if t not in tables:
                 tables.append(t)
     if not tables:
         return ""
-    return "-- Step 3: Update planner statistics after index creation\nANALYZE " + ", ".join(tables) + ";"
+    return (
+        "-- Step 3: Update planner statistics after index creation\nANALYZE "
+        + ", ".join(tables)
+        + ";"
+    )
 
 
 def review_advice(state: AgentState):
     # Node 4: review advice generated by previous node
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", REVIEW_ADVICE_PROMPT),
-        ("user", "DDL: {ddl}\nIndexes: {indexes}\nAdvice: {advice}\nOptimized SQL: {optimized_sql}\nIssues: {issues}")
-    ])
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", REVIEW_ADVICE_PROMPT),
+            (
+                "user",
+                "DDL: {ddl}\nIndexes: {indexes}\nAdvice: {advice}\nOptimized SQL: {optimized_sql}\nIssues: {issues}",
+            ),
+        ]
+    )
 
     chain = prompt | llm
 
-    response = chain.invoke({
-        "ddl": state.get("ddl"),
-        "indexes": state.get("filtered_indexes"),
-        "advice": state.get("advice"),
-        "optimized_sql": state.get("optimized_sql"),
-        "issues": state.get("issues")
-    })
+    response = chain.invoke(
+        {
+            "ddl": state.get("ddl"),
+            "indexes": state.get("filtered_indexes"),
+            "advice": state.get("advice"),
+            "optimized_sql": state.get("optimized_sql"),
+            "issues": state.get("issues"),
+        }
+    )
 
-    usage = getattr(response, 'usage_metadata', None) or {}
-    _in  = usage.get('input_tokens', 0)
-    _out = usage.get('output_tokens', 0)
+    usage = getattr(response, "usage_metadata", None) or {}
+    _in = usage.get("input_tokens", 0)
+    _out = usage.get("output_tokens", 0)
 
     try:
         result = json.loads(strip_code_block(response.content))
-        new_retry_count = (state.get("retry_count") or 0)
+        new_retry_count = state.get("retry_count") or 0
 
         if result["verdict"] == "retry":
             new_retry_count += 1
 
-        filtered_sql = result.get("filtered_optimized_sql") or state.get("optimized_sql")
+        filtered_sql = result.get("filtered_optimized_sql") or state.get(
+            "optimized_sql"
+        )
         analyze_stmt = _build_analyze_statement(result.get("filtered_indexes"))
         if analyze_stmt:
             filtered_sql = (filtered_sql or "") + "\n\n" + analyze_stmt
@@ -475,11 +550,12 @@ def review_advice(state: AgentState):
         return {
             "verdict": result["verdict"],
             "feedback": result["feedback"],
-            "filtered_indexes": result["filtered_indexes"] or state.get("filtered_indexes"),
+            "filtered_indexes": result["filtered_indexes"]
+            or state.get("filtered_indexes"),
             "optimized_sql": inject_extension_deps(filtered_sql),
             "retry_count": new_retry_count,
-            "total_input_tokens":  (state.get("total_input_tokens")  or 0) + _in,
-            "total_output_tokens": (state.get("total_output_tokens") or 0) + _out
+            "total_input_tokens": (state.get("total_input_tokens") or 0) + _in,
+            "total_output_tokens": (state.get("total_output_tokens") or 0) + _out,
         }
     except (json.JSONDecodeError, KeyError) as e:
         return {"error": f"LLM returned unparseable response: {response.content}"}
@@ -497,15 +573,21 @@ def generate_benchmark_schema(state: AgentState):
     if not state.get("optimized_sql"):
         return {"error": "No optimized SQL to benchmark"}
 
-    table_names = list(set(re.findall(r'(?:FROM|JOIN|,)\s+([a-zA-Z_][a-zA-Z0-9_]*)', original_sql, re.IGNORECASE)))
+    table_names = list(
+        set(
+            re.findall(
+                r"(?:FROM|JOIN|,)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+                original_sql,
+                re.IGNORECASE,
+            )
+        )
+    )
     suggested_ddl = state.get("optimized_sql")
 
     try:
-        new_plan = db_client.benchmark_in_sandbox(table_names, original_sql, suggested_ddl)
-        return {
-            "benchmark_result": new_plan
-        }
+        new_plan = db_client.benchmark_in_sandbox(
+            table_names, original_sql, suggested_ddl
+        )
+        return {"benchmark_result": new_plan}
     except Exception as e:
-        return {
-            "error": f"Database Execution Failure: {str(e)}"
-        }
+        return {"error": f"Database Execution Failure: {str(e)}"}

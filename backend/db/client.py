@@ -135,39 +135,29 @@ class DBClient:
             _warned_no_readonly_dsn = True
             print("WARNING: SURGEON_READONLY_DATABASE_URL not set; running user SQL with DATABASE_URL "
                   "privileges. See scripts/setup_security_role.sql.")
-
+    
     @contextmanager
-    def _readonly_transaction(self):
-        """Yield a pooled connection inside a READ ONLY transaction with statement/lock timeouts.
+    def _get_connection(self):
+        """Borrow a pooled connection on the read-only DSN and always hand it back clean.
 
-        The transaction is always rolled back and the session reset before the connection goes
-        back to the pool; a connection that can't be cleaned up is closed instead of reused.
+        The connection is rolled back and its session reset before returning to the pool;
+        a connection that can't be cleaned up is closed instead of reused.
         """
         self._warn_if_shared_dsn()
         conn_pool = _get_pool(self.readonly_dsn, self.config.pool_min, self.config.pool_max)
+
         try:
             conn = conn_pool.getconn()
         except pool.PoolError as e:
             raise RuntimeError(f"Database connection pool exhausted (max {self.config.pool_max})") from e
 
         try:
-            conn.autocommit = False
-            with conn.cursor() as cur:
-                # psycopg2 opens the transaction implicitly on the first execute,
-                # so these apply to the same transaction the user SQL runs in.
-                cur.execute("SET TRANSACTION READ ONLY")
-                cur.execute("SET LOCAL statement_timeout = %s", (self.config.statement_timeout_ms,)) # Set timeout for EXPLAIN ANALYZE
-                cur.execute("SET LOCAL lock_timeout = %s", (self.config.lock_timeout_ms,))
             yield conn
         finally:
-            # EXPLAIN ANALYZE physically executes the query, so rollback to prevent
-            # accidental writes if the input SQL contains CTEs or side-effecting functions.
             reusable = not conn.closed
             if reusable:
                 try:
                     conn.rollback()
-                    # DISCARD ALL drops session state the query may have left behind
-                    # (e.g. session-level advisory locks survive ROLLBACK). Not allowed inside a transaction.
                     conn.autocommit = True
                     with conn.cursor() as cur:
                         cur.execute("DISCARD ALL")
@@ -175,6 +165,22 @@ class DBClient:
                 except psycopg2.Error:
                     reusable = False
             conn_pool.putconn(conn, close=not reusable)
+
+    @contextmanager
+    def _readonly_transaction(self):
+        """Yield a pooled connection inside a READ ONLY transaction with statement/lock timeouts.
+
+        Cleanup (rollback, session reset, return to pool) is handled by _get_connection.
+        """
+        with self._get_connection() as conn:
+            conn.autocommit = False
+            with conn.cursor() as cur:
+                cur.execute("SET TRANSACTION READ ONLY")
+                cur.execute("SET LOCAL statement_timeout = %s", (self.config.statement_timeout_ms,)) # Set timeout for EXPLAIN ANALYZE
+                cur.execute("SET LOCAL lock_timeout = %s", (self.config.lock_timeout_ms,))
+
+            yield conn
+
 
     def execute_explain(self, sql: str):
         # Defense in depth for user SQL: single statement -> query-only allowlist ->

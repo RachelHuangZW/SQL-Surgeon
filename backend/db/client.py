@@ -180,8 +180,65 @@ class DBClient:
                 cur.execute("SET LOCAL lock_timeout = %s", (self.config.lock_timeout_ms,))
 
             yield conn
+    
+    def get_primary_keys(self, tables: list) -> list:
+        """Return [(table_name, column_name), ...] for primary-key columns of the given public tables."""
+        with self._readonly_transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT c.relname AS table_name, a.attname AS column_name
+                    FROM pg_constraint con
+                    JOIN pg_class c     ON c.oid = con.conrelid          -- 表 OID → 表名
+                    JOIN pg_namespace n ON n.oid = c.relnamespace        -- → schema 名
+                    CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)  -- 数组拆成多行
+                    JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum -- 列号 → 列名
+                    WHERE con.contype = 'p'
+                      AND n.nspname = 'public'
+                      AND c.relname = ANY(%s)
+                    ORDER BY k.ord;
+                    """,
+                    (tables,),
+                )
+                return cur.fetchall()
+        
+    def get_table_metadata(self, tables: list) -> dict:
+        """Return {table_name: {"columns": [(name, type), ...], "indexes": [(indexname, indexdef), ...]}}.
 
+        Only tables that actually exist in schema public appear as keys.
+        """
+        metadata = {}
+        with self._readonly_transaction() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT table_name, column_name, data_type
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public' AND table_name = ANY(%s)
+                    ORDER BY table_name, ordinal_position
+                    """,
+                    (tables,),
+                )
+                for table, col, dtype in cur.fetchall():
+                    # First row of a table creates its entry; later rows append to it
+                    metadata.setdefault(table, {"columns": [], "indexes": []})["columns"].append((col, dtype))
 
+                cur.execute(
+                    """
+                    SELECT tablename, indexname, indexdef
+                    FROM pg_indexes
+                    WHERE schemaname = 'public' AND tablename = ANY(%s)
+                    ORDER BY tablename, indexname
+                    """,
+                    (tables,),
+                )
+                for table, idx_name, idx_def in cur.fetchall():
+                    # A table with indexes always has columns, so its entry already exists
+                    metadata[table]["indexes"].append((idx_name, idx_def))
+
+        return metadata
+        
+        
     def execute_explain(self, sql: str):
         # Defense in depth for user SQL: single statement -> query-only allowlist ->
         # READ ONLY transaction -> statement_timeout -> least-privilege role (SURGEON_READONLY_DATABASE_URL).

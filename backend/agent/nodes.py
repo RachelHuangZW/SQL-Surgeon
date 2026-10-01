@@ -6,7 +6,6 @@ from agent.prompts import REVIEW_ADVICE_PROMPT
 
 import re
 import json
-import psycopg2
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -293,7 +292,8 @@ def inject_extension_deps(optimized_sql: str) -> str:
 
 def run_explain_node(state: AgentState):
     # Node 1: Execute EXPLAIN ANALYZE
-    dsn = os.getenv("SURGEON_READONLY_DATABASE_URL")
+    # DBClient picks SURGEON_READONLY_DATABASE_URL internally for every query it runs
+    dsn = os.getenv("DATABASE_URL")
     if not dsn:
         return {"error": "DATABASE_URL not set"}
 
@@ -309,9 +309,11 @@ def run_explain_node(state: AgentState):
     )
 
     # Extract table names up front so we can do PK check before EXPLAIN
+    # Lowercased: unquoted identifiers are stored lowercase in the catalog ('Title' -> 'title')
     table_names = list(
         set(
-            re.findall(
+            t.lower()
+            for t in re.findall(
                 r"(?:FROM|JOIN|,)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
                 sql_to_explain,
                 re.IGNORECASE,
@@ -319,91 +321,49 @@ def run_explain_node(state: AgentState):
         )
     )
 
-    # Ensure every PK column has an index before running EXPLAIN — a production DB
-    # should always have this, but benchmark or newly restored databases often don't.
-    try:
-        pk_conn = psycopg2.connect(dsn)
-        with pk_conn.cursor() as cur:
-            cur.execute(
-                """
-                    SELECT c.relname AS table_name, a.attname AS column_name
-FROM pg_constraint con
-JOIN pg_class c     ON c.oid = con.conrelid          -- 表 OID → 表名
-JOIN pg_namespace n ON n.oid = c.relnamespace        -- → schema 名
-CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)  -- 数组拆成多行
-JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum -- 列号 → 列名
-WHERE con.contype = 'p'
-  AND n.nspname = 'public'
-  AND c.relname = ANY(%s)
-ORDER BY k.ord;
-            """,
-                (table_names,),
-            )
-            pk_cols = cur.fetchall()
-            for table, col in pk_cols:
-                cur.execute(
-                    """
-                    SELECT 1 FROM pg_indexes
-                    WHERE schemaname = 'public' AND tablename = %s
-                      AND indexdef LIKE %s
-                    LIMIT 1
-                """,
-                    (table, f"%({col}%"),
-                )
-                if not cur.fetchone():
-                    print()
-        pk_conn.commit()
-    finally:
-        pk_conn.close()
-
     try:
         plan = db_client.execute_explain(sql_to_explain)
+
+        pk_cols = db_client.get_primary_keys(table_names)
+        # Only names that resolve to real tables are keys (CTE names, typos etc. drop out)
+        metadata = db_client.get_table_metadata(table_names)
+
+        # A PRIMARY KEY always comes with its index, so the thing worth flagging is a table with no PK at all
+        pk_tables = {table for table, _ in pk_cols}
+        tables_without_pk = sorted(t for t in metadata if t not in pk_tables)
+
         enriched_ddl = state.get("ddl") or ""
-        try:
-            idx_conn = psycopg2.connect(dsn)
-            with idx_conn.cursor() as cur:
-                # Auto-fetch column definitions if user didn't provide DDL
-                if not enriched_ddl.strip():
-                    for table in table_names:
-                        cur.execute(
-                            """
-                            SELECT column_name, data_type
-                            FROM information_schema.columns
-                            WHERE table_schema = 'public' AND table_name = %s
-                            ORDER BY ordinal_position
-                        """,
-                            (table,),
-                        )
-                        cols = cur.fetchall()
-                        if cols:
-                            col_defs = ", ".join(
-                                f"{name} {dtype}" for name, dtype in cols
-                            )
-                            enriched_ddl += f"CREATE TABLE {table} ({col_defs});\n"
-                # Always append existing index information
-                for table in table_names:
-                    cur.execute(
-                        """
-                        SELECT indexname, indexdef FROM pg_indexes
-                        WHERE schemaname = 'public' AND tablename = %s
-                    """,
-                        (table,),
-                    )
-                    indexes = cur.fetchall()
-                    if indexes:
-                        lines = "\n".join(
-                            f"--   {name}: {defn}" for name, defn in indexes
-                        )
-                        enriched_ddl += f"\n-- Existing indexes on {table}:\n{lines}"
-                    else:
-                        enriched_ddl += f"\n-- Existing indexes on {table}: NONE"
-        finally:
-            idx_conn.close()
+        # Auto-fetch column definitions if user didn't provide DDL
+        if not enriched_ddl.strip():
+            for table, info in metadata.items():
+                col_defs = ", ".join(f"{name} {dtype}" for name, dtype in info["columns"])
+                enriched_ddl += f"CREATE TABLE {table} ({col_defs});\n"
+
+        # Always append existing index information
+        for table, info in metadata.items():
+            indexes = info["indexes"]
+            if indexes:
+                lines = "\n".join(f"--   {name}: {defn}" for name, defn in indexes)
+                enriched_ddl += f"\n-- Existing indexes on {table}:\n{lines}"
+            else:
+                enriched_ddl += f"\n-- Existing indexes on {table}: NONE"
+
+        # Tell the LLM (via DDL) and the user (via warnings) about tables missing a PK
+        for table in tables_without_pk:
+            enriched_ddl += f"\n-- WARNING: table {table} has no PRIMARY KEY"
+
+        # Append, don't replace: rewrite_sql_node already put its warnings in this field
+        warnings = (state.get("rewrite_warnings") or []) + [
+            f"Table '{table}' has no primary key — duplicate rows are possible and "
+            f"lookups/joins on its key column may have no index; consider adding a PRIMARY KEY"
+            for table in tables_without_pk
+        ]
 
         return {
             "explain_output": plan,
             "ddl": enriched_ddl,
             "seq_scan_analyses": compute_seq_scan_analysis(plan),
+            "rewrite_warnings": warnings,
             "error": None,
         }
     except Exception as e:

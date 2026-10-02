@@ -8,7 +8,7 @@ from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
 import time
 
-from db.config import load_security_config
+from .config import load_security_config
 
 
 class UnsafeSQLError(ValueError):

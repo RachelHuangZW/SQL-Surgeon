@@ -1,8 +1,8 @@
-from agent.state import AgentState
-from db.client import DBClient
-from agent.prompts import ANALYSIS_PROMPT
-from agent.prompts import ADVICE_PROMPT
-from agent.prompts import REVIEW_ADVICE_PROMPT
+from .state import AgentState
+from ..db.client import DBClient
+from .prompts import ANALYSIS_PROMPT
+from .prompts import ADVICE_PROMPT
+from .prompts import REVIEW_ADVICE_PROMPT
 
 import re
 import json
@@ -113,9 +113,11 @@ def rewrite_comma_join(sql: str) -> str:
         filter_conds.append(cond.strip())
 
     # BFS to build JOIN chain
+    # Lists, not sets: set order of str changes per process (hash seed), which made the
+    # rewritten JOIN order — and so the LLM input and eval results — vary between runs.
     first_alias_lower = table_entries[0][0].lower()
-    joined = {first_alias_lower}
-    remaining = {e[0].lower() for e in table_entries[1:]}
+    joined = [first_alias_lower]
+    remaining = [e[0].lower() for e in table_entries[1:]]
     join_clauses = []
 
     for _ in range(len(table_entries)):
@@ -123,21 +125,23 @@ def rewrite_comma_join(sql: str) -> str:
             break
         progress = False
         for al in list(remaining):
-            for jl in list(joined):
-                key = tuple(sorted([al, jl]))
-                if key in join_graph:
-                    on_clause = " AND ".join(join_graph[key])
-                    orig_alias, tname = alias_map[al]
-                    clause = (
-                        f"JOIN {tname} AS {orig_alias} ON {on_clause}"
-                        if orig_alias.lower() != tname.lower()
-                        else f"JOIN {tname} ON {on_clause}"
-                    )
-                    join_clauses.append(clause)
-                    joined.add(al)
-                    remaining.discard(al)
-                    progress = True
-                    break
+            # Collect conditions to EVERY already-joined table, not just the first match:
+            # a dropped condition turns a filter into a cross product and changes the result.
+            on_conds = []
+            for jl in joined:
+                on_conds.extend(join_graph.get(tuple(sorted([al, jl])), []))
+            if on_conds:
+                on_clause = " AND ".join(on_conds)
+                orig_alias, tname = alias_map[al]
+                clause = (
+                    f"JOIN {tname} AS {orig_alias} ON {on_clause}"
+                    if orig_alias.lower() != tname.lower()
+                    else f"JOIN {tname} ON {on_clause}"
+                )
+                join_clauses.append(clause)
+                joined.append(al)
+                remaining.remove(al)
+                progress = True
         if not progress:
             return sql  # disconnected graph — fall back to original
 

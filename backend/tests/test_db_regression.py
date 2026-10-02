@@ -2,8 +2,8 @@ import os, sys, time
 sys.path.insert(0, "/Users/rachel/SQL-Surgeon/backend")
 from dotenv import load_dotenv; load_dotenv("/Users/rachel/SQL-Surgeon/.env")
 import psycopg2
-from db import client as C
-from db.client import DBClient, UnsafeSQLError, QueryTimeoutError
+from sql_surgeon.db import client as C
+from sql_surgeon.db.client import DBClient, UnsafeSQLError, QueryTimeoutError
 
 ADMIN, RO = os.environ["DATABASE_URL"], os.environ["SURGEON_READONLY_DATABASE_URL"]
 fails = 0

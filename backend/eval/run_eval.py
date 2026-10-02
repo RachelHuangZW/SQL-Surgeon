@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from agent.graph import app as agent_graph
+from sql_surgeon.agent.graph import app as agent_graph
 
 QUERY_DIR = os.path.expanduser("~/join-order-benchmark")
 RESULTS_DIR = os.path.join(os.path.dirname(__file__), "results")

@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from agent.graph import app
+from sql_surgeon.agent.graph import app
 
 result = app.invoke({
     "original_sql": "SELECT * FROM clinical_records WHERE diagnosis_code = 'C30' ORDER BY created_at DESC LIMIT 100",

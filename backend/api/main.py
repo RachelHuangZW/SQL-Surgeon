@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
 
-from agent.graph import app as agent_graph
+from sql_surgeon.agent.graph import app as agent_graph
 
 app = FastAPI(
     title = "SQL Surgeon",

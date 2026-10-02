@@ -347,16 +347,21 @@ The user-facing `generate_benchmark_schema` copies only ≤100k rows. For LIKE q
 ```
 SQL-Surgeon/
 ├── backend/
-│   ├── agent/
-│   │   ├── state.py        # AgentState TypedDict
-│   │   ├── prompts.py      # ANALYSIS_PROMPT, ADVICE_PROMPT, REVIEW_ADVICE_PROMPT
-│   │   ├── nodes.py        # All graph node functions + inject_extension_deps
-│   │   └── graph.py        # LangGraph StateGraph + routing logic
+│   ├── pyproject.toml      # Packages sql_surgeon/ (installable; used by sql-surgeon-mcp)
+│   ├── sql_surgeon/        # The reusable library: agent + DB client
+│   │   ├── agent/
+│   │   │   ├── state.py    # AgentState TypedDict
+│   │   │   ├── prompts.py  # ANALYSIS_PROMPT, ADVICE_PROMPT, REVIEW_ADVICE_PROMPT
+│   │   │   ├── nodes.py    # All graph node functions + inject_extension_deps
+│   │   │   └── graph.py    # LangGraph StateGraph + routing logic
+│   │   └── db/
+│   │       ├── client.py   # DBClient: execute_explain (hardened) + metadata queries + benchmark_in_sandbox
+│   │       └── config.py   # Security settings from env (read-only DSN, timeouts, pool size)
 │   ├── api/
 │   │   └── main.py         # FastAPI app — /api/diagnose + /api/health
-│   ├── db/
-│   │   ├── client.py       # DBClient: execute_explain (hardened) + benchmark_in_sandbox
-│   │   └── config.py       # Security settings from env (read-only DSN, timeouts, pool size)
+│   ├── tests/
+│   │   ├── test_rewrite.py        # Comma-join rewrite: no lost predicates, deterministic (no DB)
+│   │   └── test_db_regression.py  # DB security guards against the job database
 │   ├── eval/
 │   │   ├── run_eval.py     # Eval harness: B1/B2/combined baselines + surgeon metrics
 │   │   ├── summarize.py    # Per-run summary table + aggregate stats
@@ -483,7 +488,7 @@ When `run_benchmark: true`, `benchmark_result` contains an `EXPLAIN ANALYZE` res
 
 ### Defense in depth
 
-User SQL goes through `DBClient.execute_explain` ([backend/db/client.py](backend/db/client.py)). It has to pass several independent layers, so a gap in one is caught by the next:
+User SQL goes through `DBClient.execute_explain` ([backend/sql_surgeon/db/client.py](backend/sql_surgeon/db/client.py)). It has to pass several independent layers, so a gap in one is caught by the next:
 
 | # | Layer | What it stops |
 |---|-------|---------------|

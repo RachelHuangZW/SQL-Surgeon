@@ -1,6 +1,6 @@
 [project]
 name = "sql-surgeon"
-version = "0.1.0"
+version = "0.1.1"
 description = "LangGraph agent that diagnoses slow PostgreSQL queries from EXPLAIN ANALYZE, with a hardened read-only DB client"
 requires-python = ">=3.10"
 # Library dependencies only. The web API (fastapi/uvicorn) lives in backend/api and is not part of the package.

@@ -509,6 +509,7 @@ Connections come from a bounded `ThreadedConnectionPool` (`SURGEON_DB_POOL_MAX`)
 | `SURGEON_STATEMENT_TIMEOUT_MS` | `5000` | Maximum run time of one analyzed query |
 | `SURGEON_LOCK_TIMEOUT_MS` | `2000` | Maximum wait for a lock |
 | `SURGEON_DB_POOL_MIN` / `SURGEON_DB_POOL_MAX` | `1` / `10` | Pool bounds for the read-only connection |
+| `SURGEON_SMALL_TABLE_BYTES` | `65536` (64 kB) | Tables smaller than this (`pg_relation_size`) never get an index suggestion; skipped indexes are reported in `rewrite_warnings` |
 
 > **Note:** 5 s is too short for many JOB queries on the full 12M-row IMDb dataset. For the eval harness, raise it, e.g. `SURGEON_STATEMENT_TIMEOUT_MS=120000 python -m eval.run_eval`.
 

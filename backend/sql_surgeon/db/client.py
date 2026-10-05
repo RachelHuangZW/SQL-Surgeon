@@ -266,9 +266,11 @@ class DBClient:
                 return cur.fetchall()
         
     def get_table_metadata(self, tables: list) -> dict:
-        """Return {table_name: {"columns": [(name, type), ...], "indexes": [(indexname, indexdef), ...]}}.
+        """Return {table_name: {"columns": [(name, type), ...], "indexes": [(indexname, indexdef), ...],
+                               "size_bytes": int | None, "est_rows": int | None}}.
 
-        Only tables that actually exist in schema public appear as keys.
+        Only tables that actually exist in schema public appear as keys. size_bytes / est_rows stay
+        None for anything that isn't a plain table (views, partitioned parents).
         """
         metadata = {}
         with self._readonly_transaction() as conn:
@@ -284,7 +286,9 @@ class DBClient:
                 )
                 for table, col, dtype in cur.fetchall():
                     # First row of a table creates its entry; later rows append to it
-                    metadata.setdefault(table, {"columns": [], "indexes": []})["columns"].append((col, dtype))
+                    metadata.setdefault(
+                        table, {"columns": [], "indexes": [], "size_bytes": None, "est_rows": None}
+                    )["columns"].append((col, dtype))
 
                 cur.execute(
                     """
@@ -298,6 +302,24 @@ class DBClient:
                 for table, idx_name, idx_def in cur.fetchall():
                     # A table with indexes always has columns, so its entry already exists
                     metadata[table]["indexes"].append((idx_name, idx_def))
+
+                # relkind 'r' only: a partitioned parent ('p') reports 0 bytes and must not look small
+                cur.execute(
+                    """
+                    SELECT c.relname, pg_relation_size(c.oid), c.reltuples::bigint
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = 'public' AND c.relkind = 'r' AND c.relname = ANY(%s)
+                    """,
+                    (tables,),
+                )
+                for table, size_bytes, est_rows in cur.fetchall():
+                    # pg_relation_size reads the actual file size, so it is right even before ANALYZE
+                    # (pg_class.relpages would still say 0). reltuples is only the planner's estimate,
+                    # -1 when the table was never analyzed (PG14+).
+                    if table in metadata:
+                        metadata[table]["size_bytes"] = size_bytes
+                        metadata[table]["est_rows"] = est_rows
 
         return metadata
         

@@ -1,5 +1,5 @@
 from .state import AgentState
-from ..db.client import DBClient
+from ..db.client import DBClient, split_statements
 from .prompts import ANALYSIS_PROMPT
 from .prompts import ADVICE_PROMPT
 from .prompts import REVIEW_ADVICE_PROMPT
@@ -18,6 +18,10 @@ api_key = os.getenv("GOOGLE_API_KEY")
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-pro", google_api_key=api_key, temperature=0.0, timeout=60
 )
+
+# Tables whose heap file is under this many bytes never get an index suggestion: a Seq Scan reads the
+# whole table in a handful of pages, while one index lookup already costs several random page reads.
+SMALL_TABLE_BYTES = int(os.getenv("SURGEON_SMALL_TABLE_BYTES", "65536"))
 
 
 def _parse_from_tables(from_clause: str) -> list:
@@ -224,14 +228,18 @@ def rewrite_sql_node(state: AgentState):
     }
 
 
-def _traverse_plan(node: dict, results: list):
+def _traverse_plan(node: dict, results: list, small_tables=()):
     if node.get("Node Type") == "Seq Scan":
         rows_removed = node.get("Rows Removed by Filter", 0)
         actual_rows = node.get("Actual Rows", 0)
         total_scanned = rows_removed + actual_rows
         if total_scanned > 0:
             selectivity = actual_rows / total_scanned
-            if selectivity > 0.30:
+            # Checked first: tiny tables filter out most of their rows (1 of 7), which the
+            # selectivity rule below would otherwise call index_likely_helpful
+            if node.get("Relation Name") in small_tables:
+                verdict = "small_table"
+            elif selectivity > 0.30:
                 verdict = "seq_scan_optimal"
             elif actual_rows < 10_000:
                 verdict = "index_likely_helpful"
@@ -246,15 +254,87 @@ def _traverse_plan(node: dict, results: list):
                 }
             )
     for child in node.get("Plans", []):
-        _traverse_plan(child, results)
+        _traverse_plan(child, results, small_tables)
 
 
-def compute_seq_scan_analysis(explain_output: list) -> list:
+def compute_seq_scan_analysis(explain_output: list, small_tables=()) -> list:
     results = []
     if not explain_output:
         return results
-    _traverse_plan(explain_output[0].get("Plan", {}), results)
+    _traverse_plan(explain_output[0].get("Plan", {}), results, small_tables)
     return results
+
+
+def find_small_tables(metadata: dict) -> dict:
+    """Return {table: {"size_bytes", "est_rows"}} for tables smaller than SMALL_TABLE_BYTES."""
+    return {
+        table: {"size_bytes": info["size_bytes"], "est_rows": info["est_rows"]}
+        for table, info in metadata.items()
+        if info.get("size_bytes") is not None and info["size_bytes"] < SMALL_TABLE_BYTES
+    }
+
+
+def describe_table_size(info: dict) -> str:
+    rows = info.get("est_rows")
+    rows_text = "row count unknown" if rows is None or rows < 0 else f"~{rows} rows"
+    return f"{info['size_bytes'] // 1024} kB, {rows_text}"
+
+
+_LEADING_COMMENTS = re.compile(r"(?:\s+|--[^\n]*(?:\n|$)|/\*.*?\*/)*", re.DOTALL)
+_INDEX_TABLE = re.compile(
+    r'^CREATE\s+(?:UNIQUE\s+)?INDEX\b.*?\bON\s+(?:ONLY\s+)?(?:\w+\.)?"?(\w+)"?\s*(?:USING\s+\w+\s*)?\(',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def index_target_table(ddl: str):
+    """Table a CREATE INDEX statement is built on (lowercased), or None if ddl isn't one."""
+    m = _INDEX_TABLE.match(ddl[_LEADING_COMMENTS.match(ddl).end():])
+    return m.group(1).lower() if m else None
+
+
+def drop_small_table_indexes(indexes: list, small_tables: dict) -> tuple:
+    """Split [{ddl, reason}, ...] into (kept, skipped); skipped is [(table, ddl), ...]."""
+    kept, skipped = [], []
+    for idx in indexes or []:
+        table = index_target_table(idx.get("ddl", ""))
+        if table in small_tables:
+            skipped.append((table, idx["ddl"]))
+        else:
+            kept.append(idx)
+    return kept, skipped
+
+
+def drop_small_table_statements(script: str, small_tables: dict) -> tuple:
+    """Remove CREATE INDEX statements on small tables from the script; return (script, skipped).
+
+    The script is what users copy and what the eval scores, so filtering only the index list isn't enough.
+    Comments in front of a removed statement (e.g. "-- Step 1") are kept.
+    """
+    skipped = []
+    for statement in split_statements(script or ""):
+        body = statement[_LEADING_COMMENTS.match(statement).end():].rstrip()
+        table = index_target_table(body)
+        if table in small_tables:
+            script = re.sub(re.escape(body) + r"\s*;[ \t]*\n?", "", script, count=1)
+            skipped.append((table, body + ";"))
+    return script, skipped
+
+
+def small_table_warnings(skipped: list, small_tables: dict) -> list:
+    """One user-facing warning per distinct skipped index."""
+    warnings, seen = [], set()
+    for table, ddl in skipped:
+        key = " ".join(ddl.split()).rstrip(";").lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        warnings.append(
+            f"Skipped index on '{table}' ({describe_table_size(small_tables[table])}): the table is under "
+            f"{SMALL_TABLE_BYTES // 1024} kB, so a sequential scan already reads it in a few pages and an "
+            f"index would not make it faster. Dropped: {' '.join(ddl.split())}"
+        )
+    return warnings
 
 
 def strip_code_block(text: str) -> str:
@@ -356,6 +436,13 @@ def run_explain_node(state: AgentState):
         for table in tables_without_pk:
             enriched_ddl += f"\n-- WARNING: table {table} has no PRIMARY KEY"
 
+        small_tables = find_small_tables(metadata)
+        for table, info in small_tables.items():
+            enriched_ddl += (
+                f"\n-- SMALL TABLE {table}: {describe_table_size(info)}; a sequential scan reads the whole "
+                f"table in a few pages, so an index on it cannot help"
+            )
+
         # Append, don't replace: rewrite_sql_node already put its warnings in this field
         warnings = (state.get("rewrite_warnings") or []) + [
             f"Table '{table}' has no primary key — duplicate rows are possible and "
@@ -366,8 +453,9 @@ def run_explain_node(state: AgentState):
         return {
             "explain_output": plan,
             "ddl": enriched_ddl,
-            "seq_scan_analyses": compute_seq_scan_analysis(plan),
+            "seq_scan_analyses": compute_seq_scan_analysis(plan, small_tables),
             "rewrite_warnings": warnings,
+            "small_tables": small_tables,
             "error": None,
         }
     except Exception as e:
@@ -419,7 +507,7 @@ def generate_advice(state: AgentState):
             ("system", ADVICE_PROMPT),
             (
                 "user",
-                "SQL: {original_sql}\nIssues: {issues}\nPrevious review feedback: {feedback}",
+                "SQL: {original_sql}\nIssues: {issues}\nSmall tables: {small_tables}\nPrevious review feedback: {feedback}",
             ),
         ]
     )
@@ -430,6 +518,8 @@ def generate_advice(state: AgentState):
         {
             "original_sql": state.get("normalized_sql") or state.get("original_sql"),
             "issues": state.get("issues"),
+            # This node gets no DDL, so the small-table list is passed on its own
+            "small_tables": ", ".join(sorted(state.get("small_tables") or {})) or "None",
             "feedback": state.get("feedback") or "None",
         }
     )
@@ -476,13 +566,14 @@ def review_advice(state: AgentState):
             ("system", REVIEW_ADVICE_PROMPT),
             (
                 "user",
-                "DDL: {ddl}\nIndexes: {indexes}\nAdvice: {advice}\nOptimized SQL: {optimized_sql}\nIssues: {issues}",
+                "DDL: {ddl}\nIndexes: {indexes}\nAdvice: {advice}\nOptimized SQL: {optimized_sql}\nIssues: {issues}\nSmall tables: {small_tables}",
             ),
         ]
     )
 
     chain = prompt | llm
 
+    small_tables = state.get("small_tables") or {}
     response = chain.invoke(
         {
             "ddl": state.get("ddl"),
@@ -490,6 +581,7 @@ def review_advice(state: AgentState):
             "advice": state.get("advice"),
             "optimized_sql": state.get("optimized_sql"),
             "issues": state.get("issues"),
+            "small_tables": ", ".join(sorted(small_tables)) or "None",
         }
     )
 
@@ -507,16 +599,31 @@ def review_advice(state: AgentState):
         filtered_sql = result.get("filtered_optimized_sql") or state.get(
             "optimized_sql"
         )
-        analyze_stmt = _build_analyze_statement(result.get("filtered_indexes"))
+
+        # Hard guarantee on top of the prompts: no index on a small table survives, whatever the LLM said.
+        # Runs after the review (not before) so the reviewer never sees a "missing" JOIN key it could retry for.
+        reviewed_indexes, skipped = drop_small_table_indexes(result.get("filtered_indexes"), small_tables)
+        final_indexes, skipped_fallback = drop_small_table_indexes(
+            result["filtered_indexes"] or state.get("filtered_indexes"), small_tables
+        )
+        filtered_sql, skipped_sql = drop_small_table_statements(filtered_sql, small_tables)
+
+        analyze_stmt = _build_analyze_statement(reviewed_indexes)
         if analyze_stmt:
             filtered_sql = (filtered_sql or "") + "\n\n" + analyze_stmt
+
+        # review_advice can run up to 3 times (retries), so only add warnings not already there
+        warnings = list(state.get("rewrite_warnings") or [])
+        for warning in small_table_warnings(skipped + skipped_fallback + skipped_sql, small_tables):
+            if warning not in warnings:
+                warnings.append(warning)
 
         return {
             "verdict": result["verdict"],
             "feedback": result["feedback"],
-            "filtered_indexes": result["filtered_indexes"]
-            or state.get("filtered_indexes"),
+            "filtered_indexes": final_indexes,
             "optimized_sql": inject_extension_deps(filtered_sql),
+            "rewrite_warnings": warnings,
             "retry_count": new_retry_count,
             "total_input_tokens": (state.get("total_input_tokens") or 0) + _in,
             "total_output_tokens": (state.get("total_output_tokens") or 0) + _out,

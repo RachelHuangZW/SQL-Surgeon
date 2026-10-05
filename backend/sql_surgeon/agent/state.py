@@ -20,6 +20,7 @@ class AgentState(TypedDict):
     filtered_indexes: Optional[List[dict]]
     rewritten_sql: Optional[str]
     rewrite_warnings: Optional[List[str]]
+    small_tables: Optional[dict]
 
 
 

@@ -1,5 +1,6 @@
 from .state import AgentState
 from ..db.client import DBClient, split_statements
+from ..plan.table import flatten_plan
 from .prompts import ANALYSIS_PROMPT
 from .prompts import ADVICE_PROMPT
 from .prompts import REVIEW_ADVICE_PROMPT
@@ -454,6 +455,8 @@ def run_explain_node(state: AgentState):
             "explain_output": plan,
             "ddl": enriched_ddl,
             "seq_scan_analyses": compute_seq_scan_analysis(plan, small_tables),
+            # For display only (not sent to the LLM): one row per plan node with its estimate error
+            "plan_table": flatten_plan(plan),
             "rewrite_warnings": warnings,
             "small_tables": small_tables,
             "error": None,

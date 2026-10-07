@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { AnalysisResult } from '@/lib/api'
+import { AnalysisResult, PlanRow } from '@/lib/api'
 
 interface Props {
   result: AnalysisResult | null
@@ -40,6 +40,72 @@ function Section({ title, color, children }: {
       </h3>
       {children}
     </section>
+  )
+}
+
+const DIRECTION_STYLE: Record<PlanRow['direction'], string> = {
+  ok: 'text-slate-500',
+  over: 'text-sky-400',
+  under: 'text-amber-400',
+  'not run': 'text-slate-600 italic',
+}
+
+function PlanTable({ rows }: { rows: PlanRow[] }) {
+  // Collapsed by default: the table is the evidence behind the advice, not the headline
+  const [open, setOpen] = useState(false)
+
+  return (
+    <div className="bg-slate-900 border border-slate-800 rounded-lg">
+      <button
+        onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between px-4 py-2.5 text-sm text-slate-300 hover:text-slate-100"
+      >
+        <span>{open ? '▾' : '▸'} {rows.length} plan nodes — estimated vs actual rows</span>
+      </button>
+      {open && (
+        <div className="overflow-x-auto border-t border-slate-800">
+          <table className="w-full text-xs font-mono">
+            <thead className="text-slate-500">
+              <tr className="text-left">
+                <th className="px-2 py-2 font-normal">Node</th>
+                <th className="px-2 py-2 font-normal text-right">Est. rows</th>
+                <th className="px-2 py-2 font-normal text-right" title="Average per loop. Total rows = actual × loops">
+                  Actual rows / loop
+                </th>
+                <th className="px-2 py-2 font-normal text-right">Loops</th>
+                <th className="px-2 py-2 font-normal text-right">q-error</th>
+                <th className="px-2 py-2 font-normal">Dir</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id} className="border-t border-slate-800/60 align-top">
+                  {/* Indentation shows nesting: inner nodes run first and feed the outer ones */}
+                  <td className="px-2 py-1.5" style={{ paddingLeft: 8 + r.depth * 16 }}>
+                    <div className="text-slate-200 whitespace-nowrap">
+                      {r.op}
+                      {r.table && (
+                        <span className="text-slate-400"> on {r.table}{r.alias !== r.table ? ` ${r.alias}` : ''}</span>
+                      )}
+                    </div>
+                    {r.condition && (
+                      <div className="text-slate-500 truncate max-w-md" title={r.condition}>{r.condition}</div>
+                    )}
+                  </td>
+                  <td className="px-2 py-1.5 text-right text-slate-300">{r.plan_rows.toLocaleString()}</td>
+                  <td className="px-2 py-1.5 text-right text-slate-300">{r.actual_rows.toLocaleString()}</td>
+                  <td className="px-2 py-1.5 text-right text-slate-400">{r.loops.toLocaleString()}</td>
+                  <td className={`px-2 py-1.5 text-right ${r.q_error != null && r.q_error >= 10 ? 'text-red-400' : 'text-slate-300'}`}>
+                    {r.q_error != null ? r.q_error.toFixed(1) : '–'}
+                  </td>
+                  <td className={`px-2 py-1.5 ${DIRECTION_STYLE[r.direction]}`}>{r.direction}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -160,6 +226,12 @@ export default function ResultPanel({ result, loading, error }: Props) {
               {result.optimized_sql}
             </pre>
           </div>
+        </Section>
+      )}
+
+      {result.plan_table && result.plan_table.length > 0 && (
+        <Section title="Execution Plan" color="text-slate-400">
+          <PlanTable rows={result.plan_table} />
         </Section>
       )}
     </div>

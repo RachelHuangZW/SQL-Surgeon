@@ -28,6 +28,7 @@ class DiagnoseResponse(BaseModel):
     status: str
     rewrite_warnings: Optional[List[str]]
     explain_output: Optional[List[dict]]
+    plan_table: Optional[List[dict]] = None
     issues: List[str]
     advice: Optional[List[str]]
     filtered_indexes: Optional[List[dict]]
@@ -70,6 +71,7 @@ async def diagnose_sql(request: DiagnoseRequest):
             status = "success",
             rewrite_warnings = final_state.get("rewrite_warnings"),
             explain_output = final_state.get("explain_output"),
+            plan_table = final_state.get("plan_table"),
             issues = final_state.get("issues", []),
             advice = final_state.get("advice"),
             filtered_indexes = final_state.get("filtered_indexes"),

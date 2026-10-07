@@ -5,10 +5,27 @@ export interface IndexRecommendation {
   reason: string
 }
 
+// One plan node, flattened by backend sql_surgeon/plan/table.py (depth-first order)
+export interface PlanRow {
+  id: number
+  parent_id: number | null
+  depth: number
+  op: string
+  table: string
+  alias: string
+  plan_rows: number
+  actual_rows: number   // average per loop, not the total
+  loops: number
+  q_error: number | null   // null when the node never ran
+  direction: 'ok' | 'over' | 'under' | 'not run'
+  condition: string
+}
+
 export interface AnalysisResult {
   status: string
   rewrite_warnings: string[] | null
   explain_output: object[] | null
+  plan_table: PlanRow[] | null
   issues: string[]
   advice: string[] | null
   filtered_indexes: IndexRecommendation[] | null

@@ -21,6 +21,7 @@ class AgentState(TypedDict):
     rewritten_sql: Optional[str]
     rewrite_warnings: Optional[List[str]]
     small_tables: Optional[dict]
+    plan_table: Optional[List[dict]]
 
 
 

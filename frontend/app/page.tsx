@@ -26,17 +26,16 @@ export default function Home() {
 
   return (
     <div className="flex flex-col h-screen">
-      <header className="shrink-0 border-b border-slate-800 px-6 py-4 flex items-center gap-3">
-        <span className="text-lg">🔪</span>
+      <header className="shrink-0 border-b border-slate-200 px-6 py-4 flex items-center gap-3">
         <div>
           <h1 className="text-base font-semibold tracking-tight">
-            <span className="text-violet-400">SQL</span> Surgeon
+            <span className="text-violet-600">SQL</span> Surgeon
           </h1>
           <p className="text-xs text-slate-500">AI-powered PostgreSQL query optimizer</p>
         </div>
       </header>
 
-      <div className="flex flex-1 min-h-0 divide-x divide-slate-800">
+      <div className="flex flex-1 min-h-0 divide-x divide-slate-200">
         <div className="w-2/5 min-w-0">
           <InputPanel onAnalyze={handleAnalyze} loading={loading} />
         </div>

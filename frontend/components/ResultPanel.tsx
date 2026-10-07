@@ -66,8 +66,9 @@ function PlanTable({ rows }: { rows: PlanRow[] }) {
         <div className="overflow-x-auto border-t border-slate-800">
           <table className="w-full text-xs font-mono">
             <thead className="text-slate-500">
-              <tr className="text-left">
-                <th className="px-2 py-2 font-normal">Node</th>
+              <tr className="text-left whitespace-nowrap">
+                {/* Sticky + opaque background: node names stay visible while the numbers scroll under them */}
+                <th className="px-2 py-2 font-normal sticky left-0 z-10 bg-slate-900 border-r border-slate-800">Node</th>
                 <th className="px-2 py-2 font-normal text-right">Est. rows</th>
                 <th className="px-2 py-2 font-normal text-right" title="Average per loop. Total rows = actual × loops">
                   Actual rows / loop
@@ -79,9 +80,12 @@ function PlanTable({ rows }: { rows: PlanRow[] }) {
             </thead>
             <tbody>
               {rows.map((r) => (
-                <tr key={r.id} className="border-t border-slate-800/60 align-top">
+                <tr key={r.id} className="border-t border-slate-800/60 align-top whitespace-nowrap">
                   {/* Indentation shows nesting: inner nodes run first and feed the outer ones */}
-                  <td className="px-2 py-1.5" style={{ paddingLeft: 8 + r.depth * 16 }}>
+                  <td
+                    className="px-2 py-1.5 sticky left-0 z-10 bg-slate-900 border-r border-slate-800"
+                    style={{ paddingLeft: 8 + r.depth * 12 }}
+                  >
                     <div className="text-slate-200 whitespace-nowrap">
                       {r.op}
                       {r.table && (
@@ -89,7 +93,7 @@ function PlanTable({ rows }: { rows: PlanRow[] }) {
                       )}
                     </div>
                     {r.condition && (
-                      <div className="text-slate-500 truncate max-w-md" title={r.condition}>{r.condition}</div>
+                      <div className="text-slate-500 truncate max-w-xs" title={r.condition}>{r.condition}</div>
                     )}
                   </td>
                   <td className="px-2 py-1.5 text-right text-slate-300">{r.plan_rows.toLocaleString()}</td>

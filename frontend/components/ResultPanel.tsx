@@ -50,9 +50,11 @@ const DIRECTION_STYLE: Record<PlanRow['direction'], string> = {
   'not run': 'text-slate-400 italic',
 }
 
-function PlanTable({ rows }: { rows: PlanRow[] }) {
+function PlanTable({ rows, highlight }: { rows: PlanRow[]; highlight: Set<number> }) {
   // Open by default: it has the Diagnosis tab to itself, so it no longer makes the page long
   const [open, setOpen] = useState(true)
+  // Forced open while an issue is selected, so its rows are always visible
+  const isOpen = open || highlight.size > 0
 
   return (
     <div className="bg-white border border-slate-200 rounded-lg">
@@ -60,9 +62,9 @@ function PlanTable({ rows }: { rows: PlanRow[] }) {
         onClick={() => setOpen(!open)}
         className="w-full flex items-center justify-between px-4 py-2.5 text-sm text-slate-700 hover:text-slate-900"
       >
-        <span>{open ? '▾' : '▸'} {rows.length} plan nodes — estimated vs actual rows</span>
+        <span>{isOpen ? '▾' : '▸'} {rows.length} plan nodes — estimated vs actual rows</span>
       </button>
-      {open && (
+      {isOpen && (
         <div className="overflow-x-auto border-t border-slate-200">
           <table className="w-full text-xs font-mono">
             <thead className="text-slate-500">
@@ -79,22 +81,29 @@ function PlanTable({ rows }: { rows: PlanRow[] }) {
               </tr>
             </thead>
             <tbody>
-              {rows.map((r) => (
-                <tr key={r.id} className="border-t border-slate-100 align-top whitespace-nowrap">
-                  {/* Indentation shows nesting: inner nodes run first and feed the outer ones */}
-                  <td
-                    className="px-2 py-1.5 sticky left-0 z-10 bg-white border-r border-slate-200"
-                    style={{ paddingLeft: 8 + r.depth * 12 }}
-                  >
-                    <div className="text-slate-800 whitespace-nowrap">
-                      {r.op}
-                      {r.table && (
-                        <span className="text-slate-600"> on {r.table}{r.alias !== r.table ? ` ${r.alias}` : ''}</span>
-                      )}
+              {rows.map((r) => {
+                const lit = highlight.has(r.id)
+                // The sticky cell paints its own background, so it needs the highlight colour too
+                const bg = lit ? 'bg-amber-50' : 'bg-white'
+                return (
+                <tr key={r.id} id={`plan-node-${r.id}`} className={`border-t border-slate-100 align-top whitespace-nowrap ${bg}`}>
+                  <td className={`px-2 py-1.5 sticky left-0 z-10 border-r border-slate-200 ${bg}`}>
+                    <div className="flex">
+                      {/* Fixed-width id column so ids line up whatever the depth; issues refer to these ids */}
+                      <span className={`w-7 shrink-0 text-right mr-2 ${lit ? 'text-amber-700 font-semibold' : 'text-slate-400'}`}>#{r.id}</span>
+                      {/* Indentation shows nesting: inner nodes run first and feed the outer ones */}
+                      <div style={{ marginLeft: r.depth * 12 }}>
+                        <div className="text-slate-800 whitespace-nowrap">
+                          {r.op}
+                          {r.table && (
+                            <span className="text-slate-600"> on {r.table}{r.alias !== r.table ? ` ${r.alias}` : ''}</span>
+                          )}
+                        </div>
+                        {r.condition && (
+                          <div className="text-slate-500 truncate max-w-xs" title={r.condition}>{r.condition}</div>
+                        )}
+                      </div>
                     </div>
-                    {r.condition && (
-                      <div className="text-slate-500 truncate max-w-xs" title={r.condition}>{r.condition}</div>
-                    )}
                   </td>
                   <td className="px-2 py-1.5 text-right text-slate-700">{r.plan_rows.toLocaleString()}</td>
                   <td className="px-2 py-1.5 text-right text-slate-700">{r.actual_rows.toLocaleString()}</td>
@@ -104,7 +113,8 @@ function PlanTable({ rows }: { rows: PlanRow[] }) {
                   </td>
                   <td className={`px-2 py-1.5 ${DIRECTION_STYLE[r.direction]}`}>{r.direction}</td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </div>
@@ -127,6 +137,25 @@ type TabId = 'summary' | 'diagnosis' | 'sql' | 'db'
 function ResultTabs({ result }: { result: AnalysisResult }) {
   // Own component (not inside ResultPanel) so each new analysis remounts it and lands on Summary again
   const [tab, setTab] = useState<TabId>('summary')
+  // Index of the issue whose plan nodes are highlighted in the table (null = none)
+  const [selectedIssue, setSelectedIssue] = useState<number | null>(null)
+
+  const nodeIdsOf = (i: number) => result.issue_node_ids?.[i] ?? []
+  const highlight = new Set(selectedIssue != null ? nodeIdsOf(selectedIssue) : [])
+
+  function selectIssue(i: number) {
+    const ids = nodeIdsOf(i)
+    if (ids.length === 0) return
+    if (selectedIssue === i) {
+      setSelectedIssue(null)
+      return
+    }
+    setSelectedIssue(i)
+    // After React has re-rendered the highlight, bring the first related row into view
+    setTimeout(() => {
+      document.getElementById(`plan-node-${ids[0]}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 0)
+  }
 
   const indexCount = result.filtered_indexes?.length ?? 0
   const tabs: { id: TabId; label: string; count?: number }[] = [
@@ -184,22 +213,43 @@ function ResultTabs({ result }: { result: AnalysisResult }) {
 
       {tab === 'diagnosis' && (
         <>
-          {result.plan_table && result.plan_table.length > 0 && (
-            <Section title="Execution Plan" color="text-slate-600">
-              <PlanTable rows={result.plan_table} />
-            </Section>
-          )}
-
+          {/* Issues first, evidence below: clicking an issue highlights its plan nodes in the table */}
           {result.issues.length > 0 && (
             <Section title={<>⚠ Issues Found <span className="text-slate-500 font-normal normal-case">({result.issues.length})</span></>} color="text-amber-600">
               <ul className="flex flex-col gap-2">
-                {result.issues.map((issue, i) => (
-                  <li key={i} className="flex gap-3 text-sm text-slate-700 bg-white rounded-lg p-3 border border-slate-200">
-                    <span className="text-amber-600/70 font-mono text-xs mt-0.5 shrink-0 w-4">{i + 1}.</span>
-                    <span className="leading-relaxed">{issue}</span>
-                  </li>
-                ))}
+                {result.issues.map((issue, i) => {
+                  const ids = nodeIdsOf(i)
+                  const selected = selectedIssue === i
+                  return (
+                    <li
+                      key={i}
+                      onClick={() => selectIssue(i)}
+                      className={`flex gap-3 text-sm text-slate-700 bg-white rounded-lg p-3 border transition-colors ${
+                        selected ? 'border-amber-400 ring-1 ring-amber-200' : 'border-slate-200'
+                      } ${ids.length > 0 ? 'cursor-pointer hover:border-amber-300' : ''}`}
+                    >
+                      <span className="text-amber-600/70 font-mono text-xs mt-0.5 shrink-0 w-4">{i + 1}.</span>
+                      <div className="flex flex-col gap-1.5">
+                        <span className="leading-relaxed">{issue}</span>
+                        {ids.length > 0 && (
+                          <span className="text-xs text-slate-500">
+                            {selected ? 'Highlighted in plan: ' : 'Show in plan: '}
+                            {ids.map((id) => (
+                              <span key={id} className="font-mono text-amber-700 bg-amber-50 rounded px-1 mr-1">#{id}</span>
+                            ))}
+                          </span>
+                        )}
+                      </div>
+                    </li>
+                  )
+                })}
               </ul>
+            </Section>
+          )}
+
+          {result.plan_table && result.plan_table.length > 0 && (
+            <Section title="Execution Plan" color="text-slate-600">
+              <PlanTable rows={result.plan_table} highlight={highlight} />
             </Section>
           )}
 

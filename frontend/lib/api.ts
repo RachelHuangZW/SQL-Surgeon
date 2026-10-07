@@ -27,6 +27,7 @@ export interface AnalysisResult {
   explain_output: object[] | null
   plan_table: PlanRow[] | null
   issues: string[]
+  issue_node_ids: number[][] | null   // issue_node_ids[i] = PlanRow ids that issues[i] is about
   advice: string[] | null
   filtered_indexes: IndexRecommendation[] | null
   benchmark_result: object[] | null

@@ -66,3 +66,21 @@ def flatten_plan(explain_output):
     rows = []
     _visit(explain_output[0]["Plan"], 0, None, rows)
     return rows
+
+
+def format_plan_for_llm(rows):
+    """One indented line per node, prefixed with its id, so the LLM can point at nodes by "#id"."""
+    lines = []
+    for r in rows:
+        name = r["op"]
+        if r["table"]:
+            name += f" on {r['table']}"
+            if r["alias"] != r["table"]:
+                name += f" {r['alias']}"
+        q_text = f"q-error {r['q_error']:.1f} {r['direction']}" if r["q_error"] is not None else "never executed"
+        line = (f"{'  ' * r['depth']}#{r['id']} {name} | est {r['plan_rows']} rows, "
+                f"actual {r['actual_rows']} rows x {r['loops']} loops, {q_text}")
+        if r["condition"]:
+            line += f" | {r['condition']}"
+        lines.append(line)
+    return "\n".join(lines)

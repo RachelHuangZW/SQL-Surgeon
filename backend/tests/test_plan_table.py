@@ -7,7 +7,7 @@ import sys
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BACKEND)
-from sql_surgeon.plan.table import flatten_plan, q_error  # noqa: E402
+from sql_surgeon.plan.table import flatten_plan, format_plan_for_llm, q_error  # noqa: E402
 
 fails = 0
 
@@ -60,6 +60,16 @@ check("没有条件时是空字符串", rows[2]["condition"] == "")
 check("未执行的节点：q-error 为 None，方向 not run",
       rows[4]["q_error"] is None and rows[4]["direction"] == "not run")
 check("没有计划时返回空列表", flatten_plan(None) == [] and flatten_plan([]) == [])
+
+print("=== 3. format_plan_for_llm ===")
+lines = format_plan_for_llm(rows).splitlines()
+check("每个节点一行", len(lines) == len(rows))
+check("根节点带 #0、行数和 q-error",
+      lines[0] == "#0 Hash Join | est 42 rows, actual 15801 rows x 3 loops, q-error 376.2 under | Hash Cond: (mk.keyword_id = k.id)")
+check("子节点按层级缩进，别名和表名不同时显示别名", lines[1].startswith("  #1 Seq Scan on movie_keyword mk |"))
+check("别名和表名相同时不重复显示", lines[3].startswith("    #3 Index Scan on keyword |"))
+check("未执行的节点写 never executed", lines[4].endswith("never executed"))
+check("没有节点时是空字符串", format_plan_for_llm([]) == "")
 
 print()
 print("ALL PASS" if fails == 0 else f"{fails} FAILED")

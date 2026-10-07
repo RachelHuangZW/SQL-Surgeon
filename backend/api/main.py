@@ -30,6 +30,8 @@ class DiagnoseResponse(BaseModel):
     explain_output: Optional[List[dict]]
     plan_table: Optional[List[dict]] = None
     issues: List[str]
+    # issue_node_ids[i] = plan_table ids that issues[i] is about
+    issue_node_ids: Optional[List[List[int]]] = None
     advice: Optional[List[str]]
     filtered_indexes: Optional[List[dict]]
     execution_time_ms: Optional[float]
@@ -73,6 +75,7 @@ async def diagnose_sql(request: DiagnoseRequest):
             explain_output = final_state.get("explain_output"),
             plan_table = final_state.get("plan_table"),
             issues = final_state.get("issues", []),
+            issue_node_ids = final_state.get("issue_node_ids"),
             advice = final_state.get("advice"),
             filtered_indexes = final_state.get("filtered_indexes"),
             execution_time_ms = (final_state.get("explain_output") or [{}])[0].get("Execution Time"),

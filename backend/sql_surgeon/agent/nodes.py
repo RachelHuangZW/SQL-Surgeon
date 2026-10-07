@@ -1,6 +1,6 @@
 from .state import AgentState
 from ..db.client import DBClient, split_statements
-from ..plan.table import flatten_plan
+from ..plan.table import flatten_plan, format_plan_for_llm
 from .prompts import ANALYSIS_PROMPT
 from .prompts import ADVICE_PROMPT
 from .prompts import REVIEW_ADVICE_PROMPT
@@ -465,6 +465,33 @@ def run_explain_node(state: AgentState):
         return {"error": f"Database Execution Failure: {str(e)}"}
 
 
+def parse_issues(raw, valid_ids) -> tuple:
+    """Split the LLM's issue list into (texts, node_ids), keeping only node ids that exist in the plan.
+
+    Accepts the old format (plain strings) too, so a model that ignores node_ids still works.
+    Both lists have the same length: node_ids[i] belongs to texts[i].
+    """
+    if not isinstance(raw, list):
+        raise ValueError(f"expected a JSON array, got {type(raw).__name__}")
+    texts, node_ids = [], []
+    for item in raw:
+        if isinstance(item, str):
+            text, ids = item, []
+        elif isinstance(item, dict):
+            text, ids = item.get("issue") or "", item.get("node_ids") or []
+        else:
+            continue
+        if not text.strip():
+            continue
+        if not isinstance(ids, list):
+            ids = []
+        # bool is a subclass of int in Python, so exclude it explicitly; dict.fromkeys drops duplicates in order
+        ids = [i for i in dict.fromkeys(ids) if isinstance(i, int) and not isinstance(i, bool) and i in valid_ids]
+        texts.append(text)
+        node_ids.append(ids)
+    return texts, node_ids
+
+
 def identify_issues(state: AgentState):
     # Node 2: use LLM to identify DB issues from EXPLAIN PLAN
     prompt = ChatPromptTemplate.from_messages(
@@ -472,17 +499,20 @@ def identify_issues(state: AgentState):
             ("system", ANALYSIS_PROMPT),
             (
                 "user",
-                "DDL: {ddl}\nExecution_Plan: {execution_plan}\nSeq Scan Analysis: {seq_scan_analyses}\nPrevious feedback: {feedback}",
+                "DDL: {ddl}\nExecution_Plan: {execution_plan}\nPlan nodes:\n{plan_nodes}\nSeq Scan Analysis: {seq_scan_analyses}\nPrevious feedback: {feedback}",
             ),
         ]
     )
 
     chain = prompt | llm
 
+    plan_table = state.get("plan_table") or []
     response = chain.invoke(
         {
             "ddl": state.get("ddl"),
             "execution_plan": state.get("explain_output"),
+            # Same ids as the table the user sees, so issues can point at rows
+            "plan_nodes": format_plan_for_llm(plan_table) or "None",
             "seq_scan_analyses": state.get("seq_scan_analyses") or [],
             "feedback": state.get("feedback") or "None",
         }
@@ -493,13 +523,18 @@ def identify_issues(state: AgentState):
     _out = usage.get("output_tokens", 0)
 
     try:
-        issues = json.loads(strip_code_block(response.content))
+        issues, issue_node_ids = parse_issues(
+            json.loads(strip_code_block(response.content)), {r["id"] for r in plan_table}
+        )
         return {
+            # issues stays a list of strings: generate_advice, review_advice and the eval read it as before
             "issues": issues,
+            "issue_node_ids": issue_node_ids,
             "total_input_tokens": (state.get("total_input_tokens") or 0) + _in,
             "total_output_tokens": (state.get("total_output_tokens") or 0) + _out,
         }
-    except json.JSONDecodeError:
+    except ValueError:
+        # Also catches json.JSONDecodeError (a ValueError subclass) and parse_issues' "not an array"
         return {"error": f"LLM returned unparseable response: {response.content}"}
 
 

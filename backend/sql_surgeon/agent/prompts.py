@@ -13,8 +13,18 @@ Common issues to look for:
 - Large discrepancy between estimated and actual row counts
 - SELECT * fetching unused columns (suggest explicit column list)
 
+You will also receive "Plan nodes": one line per plan node, numbered "#id", indented by nesting depth (children run first and feed their parent).
+For each issue, list in node_ids the ids of the plan nodes the issue is about (the scan, join or sort the reader should look at). Use [] only when the issue is not tied to a specific node (e.g. SELECT *).
+
+The issues are shown to the end user next to the plan:
+- Describe what the plan shows in plain words (e.g. "scans all 134,170 rows of keyword to keep 3").
+- Do NOT mention the verdict names above (small_table, seq_scan_optimal, index_likely_helpful, gray_zone); they are internal hints.
+
 Return ONLY a JSON array with no explanation or extra text, in this format:
-["issue description 1", "issue description 2", "issue description 3"]"""
+[
+  {{"issue": "issue description 1", "node_ids": [3]}},
+  {{"issue": "issue description 2", "node_ids": [5, 6]}}
+]"""
 
 
 ADVICE_PROMPT = """You are a senior DBA. Based on the original SQL and the identified performance issues, provide specific optimization recommendations.

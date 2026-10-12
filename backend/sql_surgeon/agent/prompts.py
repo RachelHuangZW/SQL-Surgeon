@@ -10,11 +10,20 @@ Common issues to look for:
 - Sequential scan where verdict is "index_likely_helpful" or "gray_zone"
 - Large Cartesian products from poorly written JOINs
 - Sorting that spills to disk (External merge Disk)
-- Large discrepancy between estimated and actual row counts
+- Row-estimate errors listed in Estimate_Analysis (see below)
 - SELECT * fetching unused columns (suggest explicit column list)
 
 You will also receive "Plan nodes": one line per plan node, numbered "#id", indented by nesting depth (children run first and feed their parent).
 For each issue, list in node_ids the ids of the plan nodes the issue is about (the scan, join or sort the reader should look at). Use [] only when the issue is not tied to a specific node (e.g. SELECT *).
+
+You will also receive "Estimate_Analysis", pre-computed from the plan (or "None"). It refers to the same "#id"s and lists:
+- Origin: a node whose row estimate is badly wrong while its inputs are accurate (or far less wrong). This is where the misestimate starts.
+- Consequence: a slow operation caused by a misestimate, e.g. a hash that spilled to disk because it received far more rows than planned, or the inner side of a Nested Loop rescanned far more times than planned.
+How to use it:
+- Report each origin as one issue. Nodes above an origin inherit its error: do NOT report them as separate issues, even when their own q-error is large.
+- Mention each consequence inside the issue of the origin that causes it (an origin below it in the plan), and add the consequence's id to that issue's node_ids after the origin's id.
+- Report no other row-estimate problems. If Estimate_Analysis is "None", report none.
+- Describe what the plan shows (e.g. "the join of movie_keyword and keyword is estimated at 42 rows but returns 15,801"); do not guess the cause of the misestimate.
 
 The issues are shown to the end user next to the plan:
 - Describe what the plan shows in plain words (e.g. "scans all 134,170 rows of keyword to keep 3").

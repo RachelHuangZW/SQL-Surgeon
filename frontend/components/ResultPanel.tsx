@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { AnalysisResult, PlanRow } from '@/lib/api'
+import { AnalysisResult, EstimateAnalysis, EstimateConsequence, EstimateOrigin, PlanRow } from '@/lib/api'
 
 interface Props {
   result: AnalysisResult | null
@@ -50,7 +50,32 @@ const DIRECTION_STYLE: Record<PlanRow['direction'], string> = {
   'not run': 'text-slate-400 italic',
 }
 
-function PlanTable({ rows, highlight }: { rows: PlanRow[]; highlight: Set<number> }) {
+// A badge next to a node's name in the plan table
+interface NodeMark {
+  label: string
+  className: string
+}
+
+const ORIGIN_MARK: NodeMark = { label: 'misestimate origin', className: 'text-red-700 bg-red-50 border-red-200' }
+const CONSEQUENCE_MARK: Record<EstimateConsequence['type'], NodeMark> = {
+  hash_spill: { label: 'hash spilled', className: 'text-orange-700 bg-orange-50 border-orange-200' },
+  nested_loop_rescan: { label: 'rescanned', className: 'text-orange-700 bg-orange-50 border-orange-200' },
+}
+
+function estimateMarks(analysis: EstimateAnalysis | null): Map<number, NodeMark[]> {
+  const marks = new Map<number, NodeMark[]>()
+  const add = (id: number, mark: NodeMark) => marks.set(id, [...(marks.get(id) ?? []), mark])
+  analysis?.origins.forEach((o) => add(o.id, ORIGIN_MARK))
+  analysis?.consequences.forEach((c) => add(c.id, CONSEQUENCE_MARK[c.type]))
+  return marks
+}
+
+function nodeName(r: PlanRow): string {
+  if (!r.table) return r.op
+  return `${r.op} on ${r.table}${r.alias !== r.table ? ` ${r.alias}` : ''}`
+}
+
+function PlanTable({ rows, highlight, marks }: { rows: PlanRow[]; highlight: Set<number>; marks: Map<number, NodeMark[]> }) {
   // Open by default: it has the Diagnosis tab to itself, so it no longer makes the page long
   const [open, setOpen] = useState(true)
   // Forced open while an issue is selected, so its rows are always visible
@@ -98,6 +123,9 @@ function PlanTable({ rows, highlight }: { rows: PlanRow[]; highlight: Set<number
                           {r.table && (
                             <span className="text-slate-600"> on {r.table}{r.alias !== r.table ? ` ${r.alias}` : ''}</span>
                           )}
+                          {marks.get(r.id)?.map((m) => (
+                            <span key={m.label} className={`ml-2 px-1 rounded border font-sans text-[10px] ${m.className}`}>{m.label}</span>
+                          ))}
                         </div>
                         {r.condition && (
                           <div className="text-slate-500 truncate max-w-xs" title={r.condition}>{r.condition}</div>
@@ -123,6 +151,63 @@ function PlanTable({ rows, highlight }: { rows: PlanRow[]; highlight: Set<number
   )
 }
 
+function originText(o: EstimateOrigin, row: PlanRow | undefined): string {
+  const how = `${Math.round(o.q_error).toLocaleString()}× ${o.direction === 'under' ? 'underestimated' : 'overestimated'}`
+  const counts = row ? `Estimated ${row.plan_rows.toLocaleString()} rows, got ${row.actual_rows.toLocaleString()} per loop — ` : ''
+  // Same split as find_origins: accurate inputs (rule 1) vs. an error made much worse here (rule 2)
+  const why = o.child_max_q < 2
+    ? 'its inputs are estimated accurately, so the error starts here.'
+    : `its inputs are already ${Math.round(o.child_max_q)}× off and this node makes it ${Math.round(o.q_error / o.child_max_q)}× worse.`
+  return `${counts}${how}; ${why}`
+}
+
+function consequenceText(c: EstimateConsequence): string {
+  // In parallel plans time_share can exceed 1 (loops include the workers), so cap what we show
+  const share = `${Math.min(100, Math.round(c.time_share * 100))}% of execution time`
+  if (c.type === 'hash_spill') {
+    return `Hash table was planned for ${c.planned_batches} batch${c.planned_batches === 1 ? '' : 'es'} but needed ${c.actual_batches}, so it spilled to disk. Its join takes ~${share}.`
+  }
+  return `Inner side of a Nested Loop ran ${c.actual_loops?.toLocaleString()} times, planned ${c.planned_loops?.toLocaleString()}. Takes ~${share}.`
+}
+
+function EstimateErrors({ analysis, rows, selectedKey, onSelect }: {
+  analysis: EstimateAnalysis
+  rows: PlanRow[]
+  selectedKey: string | null
+  onSelect: (key: string, ids: number[]) => void
+}) {
+  const byId = new Map(rows.map((r) => [r.id, r]))
+  const items = [
+    ...analysis.origins.map((o, i) => ({ key: `origin-${i}`, id: o.id, mark: ORIGIN_MARK, text: originText(o, byId.get(o.id)) })),
+    ...analysis.consequences.map((c, i) => ({ key: `consequence-${i}`, id: c.id, mark: CONSEQUENCE_MARK[c.type], text: consequenceText(c) })),
+  ]
+
+  return (
+    <ul className="flex flex-col gap-2">
+      {items.map((item) => {
+        const row = byId.get(item.id)
+        const selected = selectedKey === item.key
+        return (
+          <li
+            key={item.key}
+            onClick={() => onSelect(item.key, [item.id])}
+            className={`flex flex-col gap-1 text-sm text-slate-700 bg-white rounded-lg p-3 border cursor-pointer transition-colors ${
+              selected ? 'border-amber-400 ring-1 ring-amber-200' : 'border-slate-200 hover:border-amber-300'
+            }`}
+          >
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-mono text-xs text-amber-700 bg-amber-50 rounded px-1">#{item.id}</span>
+              <span className="font-mono text-xs text-slate-800">{row ? nodeName(row) : ''}</span>
+              <span className={`px-1 rounded border text-[10px] ${item.mark.className}`}>{item.mark.label}</span>
+            </div>
+            <span className="leading-relaxed">{item.text}</span>
+          </li>
+        )
+      })}
+    </ul>
+  )
+}
+
 function EmptyTab({ children }: { children: React.ReactNode }) {
   return (
     <div className="text-sm text-slate-500 bg-slate-50 border border-dashed border-slate-200 rounded-lg p-6 text-center">
@@ -137,20 +222,23 @@ type TabId = 'summary' | 'diagnosis' | 'sql' | 'db'
 function ResultTabs({ result }: { result: AnalysisResult }) {
   // Own component (not inside ResultPanel) so each new analysis remounts it and lands on Summary again
   const [tab, setTab] = useState<TabId>('summary')
-  // Index of the issue whose plan nodes are highlighted in the table (null = none)
-  const [selectedIssue, setSelectedIssue] = useState<number | null>(null)
+  // The clicked item (an issue or an estimate error) whose plan nodes are highlighted in the table (null = none)
+  // key tells items apart across lists: "issue-2", "origin-0", "consequence-1"
+  const [selected, setSelected] = useState<{ key: string; ids: number[] } | null>(null)
 
   const nodeIdsOf = (i: number) => result.issue_node_ids?.[i] ?? []
-  const highlight = new Set(selectedIssue != null ? nodeIdsOf(selectedIssue) : [])
+  const highlight = new Set(selected?.ids ?? [])
+  const marks = estimateMarks(result.estimate_analysis)
+  const estimates = result.estimate_analysis
+  const estimateCount = (estimates?.origins.length ?? 0) + (estimates?.consequences.length ?? 0)
 
-  function selectIssue(i: number) {
-    const ids = nodeIdsOf(i)
+  function select(key: string, ids: number[]) {
     if (ids.length === 0) return
-    if (selectedIssue === i) {
-      setSelectedIssue(null)
+    if (selected?.key === key) {
+      setSelected(null)
       return
     }
-    setSelectedIssue(i)
+    setSelected({ key, ids })
     // After React has re-rendered the highlight, bring the first related row into view
     setTimeout(() => {
       document.getElementById(`plan-node-${ids[0]}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
@@ -219,13 +307,13 @@ function ResultTabs({ result }: { result: AnalysisResult }) {
               <ul className="flex flex-col gap-2">
                 {result.issues.map((issue, i) => {
                   const ids = nodeIdsOf(i)
-                  const selected = selectedIssue === i
+                  const isSelected = selected?.key === `issue-${i}`
                   return (
                     <li
                       key={i}
-                      onClick={() => selectIssue(i)}
+                      onClick={() => select(`issue-${i}`, ids)}
                       className={`flex gap-3 text-sm text-slate-700 bg-white rounded-lg p-3 border transition-colors ${
-                        selected ? 'border-amber-400 ring-1 ring-amber-200' : 'border-slate-200'
+                        isSelected ? 'border-amber-400 ring-1 ring-amber-200' : 'border-slate-200'
                       } ${ids.length > 0 ? 'cursor-pointer hover:border-amber-300' : ''}`}
                     >
                       <span className="text-amber-600/70 font-mono text-xs mt-0.5 shrink-0 w-4">{i + 1}.</span>
@@ -233,7 +321,7 @@ function ResultTabs({ result }: { result: AnalysisResult }) {
                         <span className="leading-relaxed">{issue}</span>
                         {ids.length > 0 && (
                           <span className="text-xs text-slate-500">
-                            {selected ? 'Highlighted in plan: ' : 'Show in plan: '}
+                            {isSelected ? 'Highlighted in plan: ' : 'Show in plan: '}
                             {ids.map((id) => (
                               <span key={id} className="font-mono text-amber-700 bg-amber-50 rounded px-1 mr-1">#{id}</span>
                             ))}
@@ -247,9 +335,21 @@ function ResultTabs({ result }: { result: AnalysisResult }) {
             </Section>
           )}
 
+          {/* Computed from the plan, not by the LLM: where row estimates first go wrong, and what that slowed down */}
+          {estimates && estimateCount > 0 && (
+            <Section title={<>≠ Row Estimate Errors <span className="text-slate-500 font-normal normal-case">({estimateCount})</span></>} color="text-red-600">
+              <EstimateErrors
+                analysis={estimates}
+                rows={result.plan_table ?? []}
+                selectedKey={selected?.key ?? null}
+                onSelect={select}
+              />
+            </Section>
+          )}
+
           {result.plan_table && result.plan_table.length > 0 && (
             <Section title="Execution Plan" color="text-slate-600">
-              <PlanTable rows={result.plan_table} highlight={highlight} />
+              <PlanTable rows={result.plan_table} highlight={highlight} marks={marks} />
             </Section>
           )}
 

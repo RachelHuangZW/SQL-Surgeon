@@ -37,16 +37,16 @@ def conditions_of(sql: str) -> list:
     return sorted(norm(c) for c in conds)
 
 
-print("=== 1. 三表环形连接：条件不能丢 ===")
+print("=== 1. Three-table cyclic join: no condition may be lost ===")
 sql = "SELECT * FROM a, b, c WHERE a.x = b.x AND b.y = c.y AND a.z = c.z"
 out = rewrite_comma_join(sql)
-check(f"三个条件都在 → {norm(out)}", all(c in out for c in ["a.x = b.x", "b.y = c.y", "a.z = c.z"]))
-check("改写前后条件集合相同", conditions_of(sql) == conditions_of(out))
+check(f"all three conditions are kept → {norm(out)}", all(c in out for c in ["a.x = b.x", "b.y = c.y", "a.z = c.z"]))
+check("same set of conditions before and after the rewrite", conditions_of(sql) == conditions_of(out))
 
-print("\n=== 2. JOB 全部查询：改写前后条件集合完全相同 ===")
+print("\n=== 2. All JOB queries: identical condition sets before and after the rewrite ===")
 files = sorted(glob.glob(os.path.join(JOB_DIR, "[0-9]*.sql")))
 if not files:
-    print(f"  SKIP 找不到 {JOB_DIR}")
+    print(f"  SKIP {JOB_DIR} not found")
 else:
     bad = []
     for f in files:
@@ -54,9 +54,9 @@ else:
         out = rewrite_comma_join(src)
         if out != src and conditions_of(src) != conditions_of(out):
             bad.append(os.path.basename(f))
-    check(f"{len(files)} 条查询，条件有出入的: {bad or '无'}", not bad)
+    check(f"{len(files)} queries, ones with differing conditions: {bad or 'none'}", not bad)
 
-print("\n=== 3. 确定性：不同哈希种子下输出一致 ===")
+print("\n=== 3. Determinism: same output under different hash seeds ===")
 probe = (
     "import sys; sys.path.insert(0, %r); from sql_surgeon.agent.nodes import rewrite_comma_join; "
     "print(rewrite_comma_join(open(%r).read()))"
@@ -66,7 +66,7 @@ outputs = {
                    env={**os.environ, "PYTHONHASHSEED": seed}).stdout
     for seed in ["0", "1", "2", "42", "1234"]
 }
-check(f"5 个种子 → {len(outputs)} 种输出", len(outputs) == 1)
+check(f"5 seeds → {len(outputs)} distinct outputs", len(outputs) == 1)
 
-print(f"\n{fails} 个失败")
+print(f"\n{fails} failed")
 sys.exit(1 if fails else 0)

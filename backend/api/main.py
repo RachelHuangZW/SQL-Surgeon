@@ -29,6 +29,8 @@ class DiagnoseResponse(BaseModel):
     rewrite_warnings: Optional[List[str]]
     explain_output: Optional[List[dict]]
     plan_table: Optional[List[dict]] = None
+    # {"origins": [...], "consequences": [...]} from sql_surgeon/plan/estimates.py; ids are plan_table ids
+    estimate_analysis: Optional[dict] = None
     issues: List[str]
     # issue_node_ids[i] = plan_table ids that issues[i] is about
     issue_node_ids: Optional[List[List[int]]] = None
@@ -60,6 +62,7 @@ async def diagnose_sql(request: DiagnoseRequest):
                 status = "failed",
                 rewrite_warnings = None,
                 explain_output = None,
+                estimate_analysis = None,
                 issues = final_state.get("issues", []),
                 advice = None,
                 filtered_indexes = None,
@@ -73,6 +76,7 @@ async def diagnose_sql(request: DiagnoseRequest):
             status = "success",
             rewrite_warnings = final_state.get("rewrite_warnings"),
             explain_output = final_state.get("explain_output"),
+            estimate_analysis = final_state.get("estimate_analysis"),
             plan_table = final_state.get("plan_table"),
             issues = final_state.get("issues", []),
             issue_node_ids = final_state.get("issue_node_ids"),

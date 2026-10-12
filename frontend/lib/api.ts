@@ -21,11 +21,37 @@ export interface PlanRow {
   condition: string
 }
 
+// Computed by backend sql_surgeon/plan/estimates.py; every id is a PlanRow id
+// Origin: a node whose row estimate is badly wrong and not just inherited from its children
+export interface EstimateOrigin {
+  id: number
+  q_error: number
+  direction: 'over' | 'under'
+  child_max_q: number   // largest q-error among its children (1 = all exact)
+}
+
+// Consequence: a slow operation caused by a misestimate
+export interface EstimateConsequence {
+  id: number
+  type: 'hash_spill' | 'nested_loop_rescan'
+  time_share: number   // fraction of execution time (0.3 = 30%); can exceed 1 in parallel plans
+  planned_batches?: number   // hash_spill only
+  actual_batches?: number
+  planned_loops?: number     // nested_loop_rescan only
+  actual_loops?: number
+}
+
+export interface EstimateAnalysis {
+  origins: EstimateOrigin[]
+  consequences: EstimateConsequence[]
+}
+
 export interface AnalysisResult {
   status: string
   rewrite_warnings: string[] | null
   explain_output: object[] | null
   plan_table: PlanRow[] | null
+  estimate_analysis: EstimateAnalysis | null
   issues: string[]
   issue_node_ids: number[][] | null   // issue_node_ids[i] = PlanRow ids that issues[i] is about
   advice: string[] | null

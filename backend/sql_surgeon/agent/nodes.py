@@ -4,6 +4,7 @@ from ..plan.table import flatten_plan, format_plan_for_llm
 from .prompts import ANALYSIS_PROMPT
 from .prompts import ADVICE_PROMPT
 from .prompts import REVIEW_ADVICE_PROMPT
+from ..plan.estimates import analyze_estimates, format_estimates_for_llm
 
 import re
 import json
@@ -455,8 +456,9 @@ def run_explain_node(state: AgentState):
             "explain_output": plan,
             "ddl": enriched_ddl,
             "seq_scan_analyses": compute_seq_scan_analysis(plan, small_tables),
-            # For display only (not sent to the LLM): one row per plan node with its estimate error
             "plan_table": flatten_plan(plan),
+            # Kept as a dict: the frontend reads its fields; identify_issues turns it into text for the LLM
+            "estimate_analysis": analyze_estimates(plan),
             "rewrite_warnings": warnings,
             "small_tables": small_tables,
             "error": None,
@@ -499,7 +501,7 @@ def identify_issues(state: AgentState):
             ("system", ANALYSIS_PROMPT),
             (
                 "user",
-                "DDL: {ddl}\nExecution_Plan: {execution_plan}\nPlan nodes:\n{plan_nodes}\nSeq Scan Analysis: {seq_scan_analyses}\nPrevious feedback: {feedback}",
+                "DDL: {ddl}\nExecution_Plan: {execution_plan}\nPlan nodes:\n{plan_nodes}\nEstimate_Analysis:\n{estimate_analysis}\nSeq Scan Analysis: {seq_scan_analyses}\nPrevious feedback: {feedback}",
             ),
         ]
     )
@@ -513,6 +515,7 @@ def identify_issues(state: AgentState):
             "execution_plan": state.get("explain_output"),
             # Same ids as the table the user sees, so issues can point at rows
             "plan_nodes": format_plan_for_llm(plan_table) or "None",
+            "estimate_analysis": format_estimates_for_llm(state.get("estimate_analysis"), plan_table),
             "seq_scan_analyses": state.get("seq_scan_analyses") or [],
             "feedback": state.get("feedback") or "None",
         }

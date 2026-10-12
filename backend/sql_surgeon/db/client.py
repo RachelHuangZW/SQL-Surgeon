@@ -252,10 +252,10 @@ class DBClient:
                     """
                     SELECT c.relname AS table_name, a.attname AS column_name
                     FROM pg_constraint con
-                    JOIN pg_class c     ON c.oid = con.conrelid          -- 表 OID → 表名
-                    JOIN pg_namespace n ON n.oid = c.relnamespace        -- → schema 名
-                    CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)  -- 数组拆成多行
-                    JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum -- 列号 → 列名
+                    JOIN pg_class c     ON c.oid = con.conrelid          -- table OID → table name
+                    JOIN pg_namespace n ON n.oid = c.relnamespace        -- → schema name
+                    CROSS JOIN LATERAL unnest(con.conkey) WITH ORDINALITY AS k(attnum, ord)  -- array → one row per element
+                    JOIN pg_attribute a ON a.attrelid = con.conrelid AND a.attnum = k.attnum -- column number → column name
                     WHERE con.contype = 'p'
                       AND n.nspname = 'public'
                       AND c.relname = ANY(%s)

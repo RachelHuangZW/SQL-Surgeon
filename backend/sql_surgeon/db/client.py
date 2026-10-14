@@ -401,6 +401,9 @@ class DBClient:
                         "CREATE TABLE {}.{} (LIKE public.{} INCLUDING DEFAULTS INCLUDING INDEXES)"
                     ).format(schema, t, t))
                     cursor.execute(pgsql.SQL("INSERT INTO {}.{} SELECT * FROM public.{} LIMIT 100000").format(schema, t, t))
+                    # A fresh copy has no statistics, so without this the planner would plan on defaults.
+                    # Done here for every copy; the advice script only analyzes tables with expression indexes.
+                    cursor.execute(pgsql.SQL("ANALYZE {}.{}").format(schema, t))
 
                 cursor.execute(pgsql.SQL("SET LOCAL search_path TO {}").format(schema))
                 for ddl in setup:

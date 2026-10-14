@@ -295,6 +295,28 @@ def index_target_table(ddl: str):
     return m.group(1).lower() if m else None
 
 
+def is_expression_index(ddl: str) -> bool:
+    """True when a key of this CREATE INDEX is an expression, e.g. (lower(email)) or ((a + b)).
+
+    PostgreSQL requires parentheses around an expression key (a function call brings its own), while
+    plain column keys never contain one, so any "(" inside the key list means an expression.
+    """
+    body = ddl[_LEADING_COMMENTS.match(ddl).end():]
+    m = _INDEX_TABLE.match(body)
+    if not m:
+        return False
+    # m ends just after the key list's opening "(": walk to its matching ")"
+    depth = 1
+    for ch in body[m.end():]:
+        if ch == "(":
+            return True
+        if ch == ")":
+            depth -= 1
+            if depth == 0:
+                return False
+    return False
+
+
 def drop_small_table_indexes(indexes: list, small_tables: dict) -> tuple:
     """Split [{ddl, reason}, ...] into (kept, skipped); skipped is [(table, ddl), ...]."""
     kept, skipped = [], []
@@ -501,7 +523,7 @@ def identify_issues(state: AgentState):
             ("system", ANALYSIS_PROMPT),
             (
                 "user",
-                "DDL: {ddl}\nExecution_Plan: {execution_plan}\nPlan nodes:\n{plan_nodes}\nEstimate_Analysis:\n{estimate_analysis}\nSeq Scan Analysis: {seq_scan_analyses}\nPrevious feedback: {feedback}",
+                "SQL: {sql}\nDDL: {ddl}\nExecution_Plan: {execution_plan}\nPlan nodes:\n{plan_nodes}\nEstimate_Analysis:\n{estimate_analysis}\nSeq Scan Analysis: {seq_scan_analyses}\nPrevious feedback: {feedback}",
             ),
         ]
     )
@@ -511,6 +533,8 @@ def identify_issues(state: AgentState):
     plan_table = state.get("plan_table") or []
     response = chain.invoke(
         {
+            # The user's own SQL: issues about the query text (e.g. SELECT *) need it, the plan can't show it
+            "sql": state.get("original_sql"),
             "ddl": state.get("ddl"),
             "execution_plan": state.get("explain_output"),
             # Same ids as the table the user sees, so issues can point at rows
@@ -583,18 +607,18 @@ def generate_advice(state: AgentState):
 
 
 def _build_analyze_statement(filtered_indexes: list) -> str:
-    # Extract unique table names from filtered index DDLs
+    # Only expression indexes need ANALYZE: it gathers statistics on the expression itself.
+    # A plain column index is usable as soon as it exists, so ANALYZE there would be a placebo.
     tables = []
     for idx in filtered_indexes or []:
-        m = re.search(r"\bON\s+(\w+)\s*\(", idx.get("ddl", ""), re.IGNORECASE)
-        if m:
-            t = m.group(1).lower()
-            if t not in tables:
-                tables.append(t)
+        ddl = idx.get("ddl", "")
+        t = index_target_table(ddl)
+        if t and is_expression_index(ddl) and t not in tables:
+            tables.append(t)
     if not tables:
         return ""
     return (
-        "-- Step 3: Update planner statistics after index creation\nANALYZE "
+        "-- Step 3: Collect statistics for the expression indexes\nANALYZE "
         + ", ".join(tables)
         + ";"
     )

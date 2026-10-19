@@ -10,7 +10,7 @@ BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BACKEND)
 from sql_surgeon.plan.table import flatten_plan  # noqa: E402
 from sql_surgeon.plan.estimates import (  # noqa: E402
-    analyze_estimates, build_parent_to_children_map, find_consequences, find_origins)
+    analyze_estimates, build_parent_to_children_map, find_consequences, find_origins, find_partial_reads)
 
 fails = 0
 
@@ -103,6 +103,42 @@ check("11d: returns origins and consequences", [o["id"] for o in r["origins"]] =
 check("both lists empty when there is no plan",
       analyze_estimates(None) == {"origins": [], "consequences": []}
       and analyze_estimates([]) == {"origins": [], "consequences": []})
+
+print("=== 5. partial reads under Merge Join / Limit ===")
+plan_11d_inlined = json.load(open(os.path.join(BACKEND, "scripts", "11d_inlined_plan.json")))
+
+
+def partial_ids(root):
+    rows = rows_of(root)
+    return find_partial_reads(rows, build_parent_to_children_map(rows))
+
+
+# Merge Join (#0) over 11.5x; its left Sort (#1) was cut short at 161 of 18,219 rows; right Sort (#3) is exact
+merge = node("Merge Join", 5620, 487, plans=[
+    node("Sort", 18219, 161, plans=[node("Seq Scan", 18219, 15801)]),
+    node("Sort", 29997, 30012, plans=[node("Seq Scan", 29997, 29997)]),
+])
+check("both children of a Merge Join may be partial; a Sort stops the marking", partial_ids(merge) == {1, 3})
+check("cut-short Sort under a Merge Join is not an origin, the Merge Join itself is", origin_ids(merge) == [0])
+check("an underestimate under a Merge Join is still an origin (a partial read only lowers Actual Rows)",
+      origin_ids(node("Merge Join", 10, 10, plans=[
+          node("Sort", 10, 5000, plans=[node("Seq Scan", 5000, 5000)]),
+          node("Sort", 10, 10, plans=[node("Seq Scan", 10, 10)]),
+      ])) == [1])
+check("a real overestimate below the Sort is still an origin (the Sort read all of it)",
+      origin_ids(node("Merge Join", 100, 100, plans=[
+          node("Sort", 100, 100, plans=[node("Seq Scan", 5000, 100)]),
+          node("Sort", 100, 100, plans=[node("Seq Scan", 100, 100)]),
+      ])) == [2])
+check("without a Sort, the marking goes all the way down",
+      partial_ids(node("Merge Join", 10, 10, plans=[
+          node("Nested Loop", 10, 10, plans=[node("Seq Scan", 10, 10), node("Index Scan", 1, 1)]),
+          node("Index Scan", 10, 10),
+      ])) == {1, 2, 3, 4})
+check("an overestimate under a Limit is not an origin",
+      origin_ids(node("Limit", 10, 10, plans=[node("Index Scan", 50000, 10)])) == [])
+check("11d with inlined keyword ids: origin is #7 Merge Join, not the cut-short #8 Sort",
+      [o["id"] for o in find_origins(flatten_plan(plan_11d_inlined))] == [7])
 
 print()
 print("ALL PASS" if fails == 0 else f"{fails} FAILED")

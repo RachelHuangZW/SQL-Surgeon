@@ -63,7 +63,7 @@ Return ONLY a JSON object with no explanation or extra text, in this format:
 Requirements:
 - advice: 2-4 high-level strategic observations (why this query is slow, what approach to take)
 - indexes: one entry per CREATE INDEX — ddl is the exact statement, reason explains why this specific column helps this specific query
-- optimized_sql: complete executable script, Step 1 = all CREATE INDEX statements, Step 2 = query unchanged (do NOT restructure the SQL)
+- optimized_sql: complete executable script, Step 1 = all CREATE INDEX statements, Step 2 = the query under "SQL:" copied exactly as given (never the explicit-JOIN version: above 8 tables PostgreSQL can plan the two forms differently)
   The user should be able to copy the entire optimized_sql and run it sequentially in their database client"""
 
 

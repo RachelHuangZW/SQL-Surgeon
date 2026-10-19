@@ -176,33 +176,31 @@ def preprocess_sql_node(state: AgentState):
 
 
 def rewrite_sql_node(state: AgentState):
-    # Rule-based SQL rewriting: safe structural rewrites + warnings for risky patterns.
+    # Rule-based warnings for risky SQL patterns (no rewriting: we must diagnose the user's own SQL)
     sql = state.get("normalized_sql") or state.get("original_sql", "")
-    rewritten = sql
-    rewrites_applied = []
     warnings = []
 
     # Warn: SELECT * — downstream consumer unknown, can't safely pick columns
-    if re.search(r"\bSELECT\s+\*", rewritten, re.IGNORECASE):
+    if re.search(r"\bSELECT\s+\*", sql, re.IGNORECASE):
         warnings.append(
             "SELECT * detected — list only the columns your application needs "
             "to reduce I/O and enable index-only scans"
         )
 
     # Warn: correlated EXISTS/NOT EXISTS subquery
-    if re.search(r"\b(?:NOT\s+)?EXISTS\s*\(\s*SELECT", rewritten, re.IGNORECASE):
+    if re.search(r"\b(?:NOT\s+)?EXISTS\s*\(\s*SELECT", sql, re.IGNORECASE):
         warnings.append(
             "EXISTS subquery detected — PostgreSQL usually unnests these automatically; "
             "if cost is still high, consider rewriting as a JOIN"
         )
 
-    # Rewrite: DISTINCT where GROUP BY already guarantees uniqueness
+    # Warn: DISTINCT where GROUP BY already guarantees uniqueness
     distinct_m = re.search(
-        r"SELECT\s+DISTINCT\s+([\w\s,\.]+?)\s+FROM", rewritten, re.IGNORECASE
+        r"SELECT\s+DISTINCT\s+([\w\s,\.]+?)\s+FROM", sql, re.IGNORECASE
     )
     groupby_m = re.search(
         r"\bGROUP\s+BY\s+([\w\s,\.]+?)(?:\s+(?:HAVING|ORDER|LIMIT|UNION|$))",
-        rewritten,
+        sql,
         re.IGNORECASE | re.DOTALL,
     )
     if distinct_m and groupby_m:
@@ -213,19 +211,13 @@ def rewrite_sql_node(state: AgentState):
             c.strip().lower().split(".")[-1] for c in groupby_m.group(1).split(",")
         }
         if sel_cols and sel_cols == grp_cols:
-            rewritten = re.sub(
-                r"\bSELECT\s+DISTINCT\b",
-                "SELECT",
-                rewritten,
-                count=1,
-                flags=re.IGNORECASE,
-            )
-            rewrites_applied.append(
-                "Removed redundant DISTINCT — GROUP BY already guarantees uniqueness"
+            warnings.append(
+                "Redundant DISTINCT detected — the SELECT list is exactly the GROUP BY columns, "
+                "and GROUP BY already returns one row per group, so DISTINCT can be removed "
+                "without changing the result"
             )
 
     return {
-        "rewritten_sql": rewritten if rewrites_applied else None,
         "rewrite_warnings": warnings,
     }
 
@@ -412,9 +404,9 @@ def run_explain_node(state: AgentState):
     if not original_sql:
         return {"error": "No Original SQL found"}
 
-    sql_to_explain = (
-        state.get("rewritten_sql") or state.get("normalized_sql") or original_sql
-    )
+    # Always the user's own SQL: above join_collapse_limit (8 tables) an explicit-JOIN
+    # rewrite can get a different, slower plan, and we must diagnose what the user runs
+    sql_to_explain = original_sql
 
     # Extract table names up front so we can do PK check before EXPLAIN
     # Lowercased: unquoted identifiers are stored lowercase in the catalog ('Title' -> 'title')
@@ -572,7 +564,7 @@ def generate_advice(state: AgentState):
             ("system", ADVICE_PROMPT),
             (
                 "user",
-                "SQL: {original_sql}\nIssues: {issues}\nSmall tables: {small_tables}\nPrevious review feedback: {feedback}",
+                "SQL: {original_sql}\nSame query with explicit JOINs (for reading only): {normalized_sql}\nIssues: {issues}\nSmall tables: {small_tables}\nPrevious review feedback: {feedback}",
             ),
         ]
     )
@@ -581,7 +573,8 @@ def generate_advice(state: AgentState):
 
     response = chain.invoke(
         {
-            "original_sql": state.get("normalized_sql") or state.get("original_sql"),
+            "original_sql": state.get("original_sql"),
+            "normalized_sql": state.get("normalized_sql"),
             "issues": state.get("issues"),
             # This node gets no DDL, so the small-table list is passed on its own
             "small_tables": ", ".join(sorted(state.get("small_tables") or {})) or "None",

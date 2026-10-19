@@ -463,15 +463,8 @@ export default function ResultPanel({ result, loading, error }: Props) {
             <span className="text-xs text-slate-500 uppercase tracking-wider">Current execution time</span>
             <span className="text-slate-900 font-mono font-medium">{result.execution_time_ms.toFixed(1)} ms</span>
           </div>
-          {result.filtered_indexes && result.filtered_indexes.length > 0 && (
-            <>
-              <span className="text-slate-300">→</span>
-              <div className="flex flex-col">
-                <span className="text-xs text-slate-500 uppercase tracking-wider">Expected after indexes</span>
-                <span className="text-emerald-600 font-medium">Faster (planner cost reduced)</span>
-              </div>
-            </>
-          )}
+          {/* No "after indexes" figure until there is a measured before/after on the same data:
+              a lower planner cost does not mean a faster query */}
         </div>
       )}
 

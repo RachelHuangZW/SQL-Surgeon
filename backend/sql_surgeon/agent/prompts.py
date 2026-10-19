@@ -11,7 +11,7 @@ Common issues to look for:
 - Large Cartesian products from poorly written JOINs
 - Sorting that spills to disk (External merge Disk)
 - Row-estimate errors listed in Estimate_Analysis (see below)
-- SELECT * fetching unused columns (suggest explicit column list)
+- SELECT * fetching unused columns (suggest explicit column list), ONLY when the SQL text itself contains "SELECT *" or "alias.*". The Output column lists in the plan are not evidence: they show what each node passes up, not what the query selects.
 
 You will also receive "Plan nodes": one line per plan node, numbered "#id", indented by nesting depth (children run first and feed their parent).
 For each issue, list in node_ids the ids of the plan nodes the issue is about (the scan, join or sort the reader should look at). Use [] only when the issue is not tied to a specific node (e.g. SELECT *).
@@ -39,6 +39,7 @@ Return ONLY a JSON array with no explanation or extra text, in this format:
 ADVICE_PROMPT = """You are a senior DBA. Based on the original SQL and the identified performance issues, provide specific optimization recommendations.
 
 If "Previous review feedback" is provided (not "None"), a previous version of your advice was rejected. You MUST directly address the reviewer's specific criticisms and correct the identified problems.
+The advice is shown to the end user, who never sees the review step: do NOT mention the review, the reviewer, previous feedback or earlier versions of the advice anywhere in your output.
 
 Never create an index on a table listed under "Small tables": the whole table fits in a few pages, so a sequential scan is already cheaper than any index lookup. This overrides every rule below, including JOIN columns.
 

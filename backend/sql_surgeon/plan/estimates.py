@@ -8,6 +8,10 @@ SECOND_SOURCE_RATIO = 10
 TIME_SHARE = 0.10
 # too few rows: don't report
 MIN_ROWS = 1000
+# Nodes that read their whole input before returning the first row
+FULL_READ_OPS = {"Sort", "Hash"}
+# Parents that can stop pulling rows from a child before the child is exhausted
+EARLY_STOP_OPS = {"Merge Join", "Limit"}
 
 def build_parent_to_children_map(rows):
     """
@@ -24,6 +28,26 @@ def build_parent_to_children_map(rows):
     return parent_map
 
 
+def find_partial_reads(rows, children_map):
+    """ids of nodes whose Actual Rows may count only part of their output"""
+    partial = set()
+    
+    def mark(node):
+        partial.add(node["id"])
+        # Its own output may be cut short, but it already read everything below it
+        if node["op"] in FULL_READ_OPS:
+            return
+        for child in children_map.get(node["id"], []):
+            mark(child)
+    
+    for row in rows:
+        if row["op"] in EARLY_STOP_OPS:
+            for child in children_map.get(row["id"], []):
+                mark(child)
+    
+    return partial
+
+
 def find_origins(rows):
     """
     Find where misestimates originate: the node is badly wrong, and the error is not inherited from its children
@@ -31,9 +55,17 @@ def find_origins(rows):
     """
     children_map = build_parent_to_children_map(rows)
     origins = []
+    partial = find_partial_reads(rows, children_map)
+    
+    def trustworthy(row):
+        # A partial read can only make Actual Rows smaller, so only an overestimate can be fake
+        return not (row["id"] in partial and row["direction"] == "over")
+
     for row in rows:
         # Never-executed nodes have no q-error
         if row["q_error"] is None:
+            continue
+        if not trustworthy(row):
             continue
         # Not wrong enough
         if row["q_error"] < BAD_Q:
@@ -43,7 +75,7 @@ def find_origins(rows):
             continue
         
         # Largest q-error among the children; a leaf has no children, so treat it as 1 (exact)
-        child_qs = [c["q_error"] for c in children_map.get(row["id"], []) if c["q_error"] is not None]
+        child_qs = [c["q_error"] for c in children_map.get(row["id"], []) if c["q_error"] is not None and trustworthy(c)]
         child_max_q = max(child_qs, default=1)
 
         # Rule 1: all children are accurate → the error first appears here

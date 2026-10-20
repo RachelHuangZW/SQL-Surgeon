@@ -131,13 +131,18 @@ def find_consequences(rows, execution_time_ms):
             # Planned inner executions = outer estimated rows × outer loops
             planned_loops = max(outer["plan_rows"] * outer["loops"], 1)
             share = time_share(inner)
-            if inner["loops"] / planned_loops >= BAD_Q and share >= TIME_SHARE:
+            inner_loops = inner["loops"]
+            if inner["op"] == "Memoize":
+                # Memoize's loops count cache lookups; the real executions are its child's loops (= cache misses)
+                inner_loops = children_map[inner["id"]][0]["loops"]
+            
+            if inner_loops / planned_loops >= BAD_Q and share >= TIME_SHARE:
                 consequences.append({
                     "id": inner["id"],
                     "type": "nested_loop_rescan",
                     "time_share": share,
                     "planned_loops": planned_loops,
-                    "actual_loops": inner["loops"],
+                    "actual_loops": inner_loops,
                 })
     return consequences
 

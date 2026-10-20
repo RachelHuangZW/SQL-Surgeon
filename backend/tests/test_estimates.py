@@ -97,6 +97,22 @@ check("inner side ran only 5x more than planned → not reported", find_conseque
 check("no execution time → empty list", find_consequences(rows_of(nested_loop(100000, 0.0003)), None) == [])
 check("11d has no consequences (no node reaches 10% of 391ms)", find_consequences(flatten_plan(plan_11d), 391.16) == [])
 
+def nested_loop_memoize(lookups, misses):
+    """Nested Loop whose inner side is a Memoize: `lookups` cache lookups, `misses` real executions below it"""
+    return node("Nested Loop", 10, lookups, time=95, plans=[
+        node("Seq Scan", 10, lookups),                                   # #1 outer: planned 10 rows, produced `lookups`
+        node("Memoize", 1, 1, loops=lookups, time=0.0003, plans=[        # #2 30% of the time, so only the loop count decides
+            node("Index Scan", 1, 1, loops=misses, time=0.001),          # #3 runs once per cache miss
+        ]),
+    ])
+
+c = find_consequences(rows_of(nested_loop_memoize(100000, 5)), 100.0)
+check("Memoize: 100,000 lookups but only 5 real executions (planned 10) → not reported", c == [])
+
+c = find_consequences(rows_of(nested_loop_memoize(100000, 50000)), 100.0)
+check("Memoize: 50,000 real executions, planned 10 → reported with the real count",
+      len(c) == 1 and c[0]["type"] == "nested_loop_rescan" and c[0]["actual_loops"] == 50000)
+
 print("=== 4. analyze_estimates ===")
 r = analyze_estimates(plan_11d)
 check("11d: returns origins and consequences", [o["id"] for o in r["origins"]] == [11] and r["consequences"] == [])

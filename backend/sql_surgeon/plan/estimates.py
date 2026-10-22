@@ -103,7 +103,7 @@ def find_consequences(rows, execution_time_ms):
     def time_share(row):
         # Actual Total Time is a per-loop average and includes the children's time
         # Note: in parallel plans loops includes the workers, so this overcounts and leans toward reporting more
-        return row["actual_total_time"] * row["loops"] / execution_time_ms
+        return row["actual_total_time"] * row["loops"] / (execution_time_ms * row["processes"])
 
     consequences = []
     for row in rows:

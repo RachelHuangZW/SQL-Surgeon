@@ -61,6 +61,21 @@ check("never-executed node: q-error is None, direction not run",
       rows[4]["q_error"] is None and rows[4]["direction"] == "not run")
 check("empty list when there is no plan", flatten_plan(None) == [] and flatten_plan([]) == [])
 
+# processes: below a Gather, every node is run by the launched workers + the leader
+gather_plan = [{"Execution Time": 1.0, "Plan": {
+    "Node Type": "Gather", "Plan Rows": 1, "Actual Rows": 1, "Actual Loops": 1, "Workers Launched": 2,
+    "Plans": [
+        {"Node Type": "Hash Join", "Plan Rows": 1, "Actual Rows": 1, "Actual Loops": 3, "Plans": [
+            {"Node Type": "Seq Scan", "Plan Rows": 1, "Actual Rows": 1, "Actual Loops": 3},
+        ]},
+    ],
+}}]
+g = flatten_plan(gather_plan)
+check("Gather itself runs in the leader only → processes 1", g[0]["processes"] == 1)
+check("child and grandchild of a Gather with 2 workers → processes 3", [r["processes"] for r in g[1:]] == [3, 3])
+check("no Gather in the plan → processes 1 everywhere", [r["processes"] for r in rows] == [1, 1, 1, 1, 1])
+
+
 print("=== 3. format_plan_for_llm ===")
 lines = format_plan_for_llm(rows).splitlines()
 check("one line per node", len(lines) == len(rows))

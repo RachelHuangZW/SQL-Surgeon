@@ -25,7 +25,7 @@ def q_error(plan_rows, actual_rows):
     return q, direction
 
 
-def _visit(node, depth, parent_id, rows):
+def _visit(node, depth, parent_id, rows, processes=1):
     loops = node.get("Actual Loops", 0)
     if loops == 0:
         # Never executed: its row counts mean nothing, so no q-error
@@ -50,12 +50,18 @@ def _visit(node, depth, parent_id, rows):
         "hash_batch": node.get("Hash Batches", 0),
         "original_hash_batch": node.get("Original Hash Batches", 0),
         "loops": loops,
+        "processes": processes,
         "q_error": q,
         "direction": direction,
         "condition": " / ".join(conditions),
     })
+    if node["Node Type"] in ("Gather", "Gather Merge"):
+        child_processes = node.get("Workers Launched", 0) + 1
+    else:
+        child_processes = processes
+    
     for child in node.get("Plans", []):
-        _visit(child, depth + 1, node_id, rows)
+        _visit(child, depth + 1, node_id, rows, child_processes)
 
 
 def flatten_plan(explain_output):

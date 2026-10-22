@@ -113,6 +113,22 @@ c = find_consequences(rows_of(nested_loop_memoize(100000, 50000)), 100.0)
 check("Memoize: 50,000 real executions, planned 10 → reported with the real count",
       len(c) == 1 and c[0]["type"] == "nested_loop_rescan" and c[0]["actual_loops"] == 50000)
 
+def parallel_nested_loop(inner_time):
+    """Gather (2 workers) → Nested Loop run by 3 processes; the inner side ran 100,000 times in each process"""
+    return node("Gather", 10, 10, time=99, plans=[
+        node("Nested Loop", 10, 100000, loops=3, time=98, plans=[
+            node("Seq Scan", 10, 100000, loops=3),                               # outer: 10 planned × 3 processes = 30
+            node("Index Scan", 1, 1, loops=300000, time=inner_time),             # 3 processes × 100,000 each
+        ]),
+    ], **{"Workers Launched": 2})
+
+c = find_consequences(rows_of(parallel_nested_loop(0.00005)), 100.0)
+check("parallel: inner side really takes 5% (old formula said 15%) → not reported", c == [])
+
+c = find_consequences(rows_of(parallel_nested_loop(0.0003)), 100.0)
+check("parallel: inner side really takes 30% (old formula said 90%) → reported with share 0.3",
+      len(c) == 1 and c[0]["type"] == "nested_loop_rescan" and round(c[0]["time_share"], 2) == 0.3)
+
 print("=== 4. analyze_estimates ===")
 r = analyze_estimates(plan_11d)
 check("11d: returns origins and consequences", [o["id"] for o in r["origins"]] == [11] and r["consequences"] == [])

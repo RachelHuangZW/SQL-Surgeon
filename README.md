@@ -2,39 +2,48 @@
 
 **An agentic SQL tuning tool powered by LLMs and real PostgreSQL execution plan analysis.**
 
-SQL Surgeon takes a slow query + table DDL, runs `EXPLAIN ANALYZE` against your database, and uses an LLM-driven agent loop to identify bottlenecks, generate optimization advice, and produce a ready-to-run index + query script — with a self-reflection step to verify quality before returning results.
+SQL Surgeon takes a slow query (+ optional DDL), runs `EXPLAIN ANALYZE` against your database in a read-only, time-limited transaction, and uses an LLM-driven agent loop to identify bottlenecks, generate optimization advice, and produce a ready-to-run index + query script — with a review step that checks the advice before returning it.
+
+The LLM is never trusted on its own. Deterministic code around it pinpoints where the planner's row estimates go wrong, keeps index suggestions off tiny tables, and checks every recommended index against the real schema (with hypopg) before anything reaches the user.
+
+The pipeline ships as the `sql_surgeon` Python package, which the [sql-surgeon-mcp](https://github.com/RachelHuangZW/sql-surgeon-mcp) server also uses to expose it to Claude.
 
 ---
 
 ## How It Works
 
-SQL Surgeon is built as a **LangGraph state machine**. The graph has a built-in review-and-retry loop so the agent can catch and correct low-quality advice before surfacing it. When `run_benchmark: true` is passed via the API, the graph also runs a live sandbox benchmark to validate the optimized SQL.
+SQL Surgeon is built as a **LangGraph state machine** with a review-and-retry loop. When `run_benchmark: true` is passed via the API, the graph also runs a sandbox benchmark of the suggested indexes.
 
 ```
-run_explain → identify_issue → generate_advice → review_advice
-                                      ↑                 |
-                                      └── retry (max 2) ┤
-                                                         |
-                                          (run_benchmark: true)
-                                                         ↓
-                                       generate_benchmark_schema → END
-                                                         |
-                                                        END
+preprocess_sql → rewrite_sql → run_explain → identify_issue → generate_advice → review_advice
+                                                                    ↑                 │
+                                                                    └──── retry ──────┤
+                                                                                      │
+                                                       (run_benchmark: true) ─────────┤
+                                                                ↓                     ↓
+                                                   generate_benchmark_schema → END   END
 ```
 
 **Node-by-node:**
 
 | Node | What it does |
 |------|-------------|
-| `run_explain` | Runs `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` in a read-only, time-limited transaction on the least-privilege connection, then rolls back (see [Security](#security)) |
-| `identify_issue` | LLM reads the execution plan + DDL, returns a list of specific bottlenecks |
-| `generate_advice` | LLM produces concrete recommendations + a two-step executable script (CREATE INDEX + optimized query). If `review_advice` returned feedback from a prior retry, that feedback is injected into this prompt so the LLM directly addresses the reviewer's criticisms. |
-| `review_advice` | LLM acts as a senior DBA reviewer — returns `pass` or `retry` with feedback |
-| `generate_benchmark_schema` | Creates an isolated schema, copies ≤100k rows from all tables referenced in the query, applies suggested indexes, runs `EXPLAIN ANALYZE`, then drops the schema |
+| `preprocess_sql` | Rewrites comma joins (`FROM a, b WHERE a.id = b.id`) into explicit `JOIN ... ON` as `normalized_sql`, **for the LLM to read only**. Every join predicate is kept and the output is deterministic. |
+| `rewrite_sql` | Rule-based warnings, no rewriting: `SELECT *`, `EXISTS` subqueries, `DISTINCT` already implied by `GROUP BY` |
+| `run_explain` | Runs `EXPLAIN (ANALYZE, COSTS, VERBOSE, BUFFERS, FORMAT JSON)` on the **user's own SQL** (above `join_collapse_limit` = 8 tables, an explicit-JOIN rewrite can get a different plan) in a read-only, time-limited transaction (see [Security](#security)). Then flattens the plan into `plan_table`, runs the [misestimate analysis](#misestimate-analysis), fetches existing indexes (and column definitions, when no DDL was given) for every real table in the query, finds tables under 64 kB, and warns about tables without a primary key. |
+| `identify_issue` | LLM reads the plan table, DDL and misestimate analysis, returns specific bottlenecks, each linked to the plan nodes it is about (`issue_node_ids`) |
+| `generate_advice` | LLM produces recommendations, index DDL with a reason for each, and a two-step script (`-- Step 1` indexes, `-- Step 2` the query). On a retry, the review feedback is in its prompt. It is **not** given the DDL. |
+| `review_advice` | LLM acts as a senior DBA reviewer (`pass` / `retry` + feedback), then the deterministic guarantees below run on its output |
+| `generate_benchmark_schema` | Copies ≤100k rows of each table in the query into a temporary schema, applies the suggested indexes, runs `EXPLAIN ANALYZE` — all in one transaction that is always rolled back |
 
-**Retry flow:** If `review_advice` returns `retry`, feedback routes back to `generate_advice` (not `identify_issue`). The diagnosis is not re-run — only the advice generation step is retried, with the reviewer's feedback included in the prompt. Max 2 retries.
+**Deterministic guarantees in `review_advice`** (applied whatever the LLMs said):
 
-**Extension dependency injection:** Before returning `optimized_sql`, `generate_advice` scans the generated DDL for operator classes like `gin_trgm_ops` or `btree_gin`. If found, the corresponding `CREATE EXTENSION IF NOT EXISTS` statement is automatically prepended to the script. This prevents the user from hitting missing-extension errors when running the output.
+- **No index on a small table.** Tables under `SURGEON_SMALL_TABLE_BYTES` (64 kB) are read in a few pages by a sequential scan, so their indexes are removed from the list and the script, with a warning.
+- **No index on a column that doesn't exist.** LLMs invent columns from their training data (e.g. IMDb's `tconst`). Every recommended `CREATE INDEX` is checked with `hypopg_create_index` against the real schema, in the read-only transaction, without building anything. A rejected index sends the advice back to `generate_advice` with PostgreSQL's error and the table's real columns. If no retry is left, it is dropped with a warning. GIN/GiST/BRIN indexes can't be simulated by hypopg and are kept unchecked.
+- **`-- Step 3: ANALYZE` only for expression indexes**, where it collects the statistics the planner needs. For a plain column index it would be a placebo.
+- **Extension dependencies.** Operator classes like `gin_trgm_ops` / `btree_gin` get their `CREATE EXTENSION IF NOT EXISTS` prepended to the script.
+
+**Retry flow:** a `retry` verdict (from the reviewer or from a rejected index) routes back to `generate_advice`, not `identify_issue`: the diagnosis is not re-run. `retry_count` goes up on each retry verdict, and the loop ends once it reaches `MAX_RETRY_COUNT` (2), so `generate_advice` runs at most twice.
 
 ---
 
@@ -45,23 +54,56 @@ The shared state (`AgentState` TypedDict) passed between nodes:
 | Field | Type | Description |
 |-------|------|-------------|
 | `original_sql` | str | Input query |
-| `ddl` | str | Table DDL |
+| `normalized_sql` | str | Same query with explicit JOINs, for the LLM to read only |
+| `ddl` | str | Table DDL (user-provided or auto-fetched), plus existing indexes and missing-PK notes |
 | `run_benchmark` | bool | Whether to run sandbox benchmark after advice passes review |
 | `explain_output` | list[dict] | EXPLAIN ANALYZE JSON plan |
+| `plan_table` | list[dict] | The plan flattened to one row per node: estimated vs. actual rows, loops, q-error, processes, conditions |
+| `estimate_analysis` | dict | `{"origins": [...], "consequences": [...]}` from the [misestimate analysis](#misestimate-analysis) |
+| `seq_scan_analyses` | list[dict] | Per sequential scan: selectivity, rows and a verdict on whether an index could help |
+| `small_tables` | dict | Tables under the small-table threshold, with their size |
 | `issues` | list[str] | Identified bottlenecks |
+| `issue_node_ids` | list[list[int]] | `issue_node_ids[i]` = `plan_table` ids that `issues[i]` is about |
 | `advice` | list[str] | Human-readable recommendations |
-| `optimized_sql` | str | Two-step DDL + query script |
-| `feedback` | str | Reviewer's feedback if verdict was `retry` |
+| `filtered_indexes` | list[dict] | Recommended indexes, `{"ddl", "reason"}`, after review and the deterministic checks |
+| `optimized_sql` | str | Script: Step 1 indexes, Step 2 query, Step 3 ANALYZE when needed |
+| `rewrite_warnings` | list[str] | Anti-pattern warnings, tables without a PK, dropped indexes and why |
+| `feedback` | str | Reviewer's (and the schema check's) feedback if verdict was `retry` |
 | `verdict` | str | `pass` or `retry` |
-| `retry_count` | int | Number of retries so far |
+| `retry_count` | int | Number of retry verdicts so far |
 | `benchmark_result` | list[dict] | EXPLAIN ANALYZE from sandbox benchmark |
+| `total_input_tokens` / `total_output_tokens` | int | LLM token usage across all calls |
 | `error` | str | First error encountered |
+
+---
+
+## Misestimate Analysis
+
+Most slow plans are wrong because the planner's **row estimates** are wrong: it expects 10 rows, gets a million, and picks a Nested Loop or an in-memory hash that can't cope. `sql_surgeon/plan/estimates.py` finds these in the plan deterministically and gives the result both to the LLM and to the Diagnosis tab.
+
+**q-error** of a node = how far off the estimate is, `max(estimated / actual, actual / estimated)`, always ≥ 1.
+
+**Origins** — where an estimation error *starts*. Errors propagate upward through the plan, so a bad node is only an origin if:
+
+- its q-error is ≥ 10 and it handled ≥ 1,000 rows (estimated or actual, × loops), and
+- its children are accurate (q-error < 2), **or** it is ≥ 10× worse than its worst child (a second, independent source).
+
+Children of a `Merge Join` or `Limit` may be stopped early, so their actual row counts can be partial; an overestimate there isn't trusted (except below a `Sort` / `Hash`, which reads its whole input first).
+
+**Consequences** — slow operations the misestimates caused, reported only if they take ≥ 10% of execution time:
+
+| Type | Detected when |
+|------|---------------|
+| `hash_spill` | A Hash needed more batches than planned (it spilled to disk) |
+| `nested_loop_rescan` | A Nested Loop's inner side ran ≥ 10× more times than planned. Under a `Memoize`, only cache misses count: those are the node below it actually running. |
+
+Time shares account for parallel plans: below a `Gather`, the leader and the launched workers run the subtree at the same time, so `time × loops` is divided by that number of processes.
 
 ---
 
 ## Evaluation Framework
 
-SQL Surgeon includes an offline evaluation harness benchmarked on the **Join Order Benchmark (JOB)** — 113 analytical queries over the IMDb dataset (~12M rows in `cast_info`).
+SQL Surgeon includes an offline evaluation harness benchmarked on the **Join Order Benchmark (JOB)** — 113 analytical queries over the IMDb dataset (36M rows in `cast_info`, 15M in `movie_info`).
 
 ### Design: Three Eval Paths
 
@@ -85,7 +127,7 @@ SQL Surgeon includes an offline evaluation harness benchmarked on the **Join Ord
 Because hypopg cannot simulate GIN indexes, a third path handles queries where the surgeon recommends GIN:
 
 - **What it does:** Creates real GIN indexes on the real DB, runs `EXPLAIN` only (no ANALYZE), checks which indexes appear in the plan, drops them in `finally`
-- **Why real DB, not sandbox:** A 100k-row sandbox has wrong planner statistics for GIN decisions. PostgreSQL's planner decides to use GIN based on `pg_class.reltuples` and `pg_statistic`. On the real 12M-row table it correctly chooses GIN; on a 100k sandbox it often prefers a sequential scan.
+- **Why real DB, not sandbox:** A 100k-row sandbox has wrong planner statistics for GIN decisions. PostgreSQL's planner decides to use GIN based on `pg_class.reltuples` and `pg_statistic`. On the full-size table it correctly chooses GIN; on a 100k sandbox it often prefers a sequential scan.
 
 ### Combined Oracle (`oracle_greedy_combined`)
 
@@ -293,7 +335,7 @@ cd backend && python -m eval.compare <baseline_run_id> <current_run_id>
 
 JOB queries have systematic patterns that affect pipeline behavior across all 113 queries.
 
-**Implicit comma-join syntax:** JOB queries use SQL-89 style (`FROM a, b, c WHERE a.id = b.id`). The surgeon consistently rewrites these to explicit `INNER JOIN ... ON` syntax. The eval's `get_table_names()` regex handles comma-separated table lists explicitly.
+**Implicit comma-join syntax:** JOB queries use SQL-89 style (`FROM a, b, c WHERE a.id = b.id`). `preprocess_sql` gives the LLM an explicit-JOIN version to read, but `EXPLAIN` always runs the original: 51 of the 113 JOB queries join more than 8 tables, and above `join_collapse_limit` PostgreSQL stops reordering explicit JOINs, so the rewrite could be planned differently. The eval's `get_table_names()` regex handles comma-separated table lists explicitly.
 
 **Leading wildcard LIKE (`LIKE '%pattern%'`):** Many queries filter text columns with arbitrary patterns. B-tree indexes are useless here. The surgeon correctly identifies this and recommends GIN with `pg_trgm`. Whether the planner actually uses the GIN index depends on selectivity estimates — low-selectivity patterns may still trigger a sequential scan.
 
@@ -319,11 +361,28 @@ As described above: ISP is NP-hard, b2 values are greedy upper bounds, not theor
 
 ### 4. eval measures planner cost, not wall-clock time
 
-All cost values are PostgreSQL's internal planner estimates. Actual runtime requires `EXPLAIN ANALYZE` against 12M rows — expensive and not included in the offline eval.
+All cost values are PostgreSQL's internal planner estimates. Actual runtime requires `EXPLAIN ANALYZE` against the full dataset (36M rows in `cast_info`) — expensive and not included in the offline eval.
 
 ### 5. Sandbox benchmark (Path 1) uses 100k-row sample
 
 The user-facing `generate_benchmark_schema` copies only ≤100k rows. For LIKE queries on large text columns, GIN index adoption may not be visible in the sandbox because planner statistics differ from the real table.
+
+### 6. The sandbox benchmark has two open issues
+
+- It runs the original query with `DATABASE_URL` privileges, so side effects outside the transaction (e.g. `pg_terminate_backend`) aren't undone by its rollback ([#1](https://github.com/RachelHuangZW/SQL-Surgeon/issues/1)). Until fixed, don't enable `run_benchmark` for untrusted input.
+- Suggested `pg_trgm` GIN indexes fail to build in the sandbox because its `search_path` excludes `public` ([#2](https://github.com/RachelHuangZW/SQL-Surgeon/issues/2)).
+
+### 7. GIN/GiST/BRIN recommendations are not checked against the schema
+
+hypopg can only simulate B-tree-like indexes, so a made-up column in a GIN index (roughly 1 in 10 recommendations on JOB) still reaches the user.
+
+### 8. generate_advice writes indexes without seeing the DDL
+
+The review-time schema check catches invented columns, but only after the fact. Giving `generate_advice` the DDL could prevent them; it would change the prompt and the eval baseline, so it hasn't been done yet.
+
+### 9. Eval results predate recent changes
+
+The 30-query runs in `eval/results/` (July–August) predate the database rebuild and the comma-join predicate fix. The latest run (`ysmbdh`, 5 queries, after the small-table filter) predates diagnosing the original SQL, the misestimate analysis and the schema check. A new full baseline is needed before comparing new runs against them.
 
 ---
 
@@ -335,7 +394,7 @@ The user-facing `generate_benchmark_schema` copies only ≤100k rows. For LIKE q
 | LLM | Google Gemini 2.5 Pro (`temperature=0.0`, `timeout=60`) |
 | Backend API | FastAPI + Uvicorn |
 | Database | PostgreSQL 17 (via psycopg2) |
-| Hypothetical indexes | hypopg |
+| Hypothetical indexes | hypopg (eval oracle + schema check of recommended indexes) |
 | Text search indexes | pg_trgm |
 | Evaluation dataset | Join Order Benchmark (JOB) over IMDb |
 | Frontend | Next.js 14 (App Router) + Tailwind CSS |
@@ -348,20 +407,32 @@ The user-facing `generate_benchmark_schema` copies only ≤100k rows. For LIKE q
 SQL-Surgeon/
 ├── backend/
 │   ├── pyproject.toml      # Packages sql_surgeon/ (installable; used by sql-surgeon-mcp)
-│   ├── sql_surgeon/        # The reusable library: agent + DB client
+│   ├── sql_surgeon/        # The reusable library: agent + plan analysis + DB client
 │   │   ├── agent/
 │   │   │   ├── state.py    # AgentState TypedDict
 │   │   │   ├── prompts.py  # ANALYSIS_PROMPT, ADVICE_PROMPT, REVIEW_ADVICE_PROMPT
-│   │   │   ├── nodes.py    # All graph node functions + inject_extension_deps
+│   │   │   ├── nodes.py    # Graph nodes + deterministic checks (small tables, schema check, rewrite)
 │   │   │   └── graph.py    # LangGraph StateGraph + routing logic
+│   │   ├── plan/
+│   │   │   ├── table.py    # Flatten EXPLAIN JSON into per-node rows (q-error, loops, processes)
+│   │   │   └── estimates.py # Misestimate origins and consequences
 │   │   └── db/
-│   │       ├── client.py   # DBClient: execute_explain (hardened) + metadata queries + benchmark_in_sandbox
+│   │       ├── client.py   # DBClient: hardened read-only query/EXPLAIN, metadata, hypopg index check, sandbox benchmark
 │   │       └── config.py   # Security settings from env (read-only DSN, timeouts, pool size)
 │   ├── api/
 │   │   └── main.py         # FastAPI app — /api/diagnose + /api/health
-│   ├── tests/
-│   │   ├── test_rewrite.py        # Comma-join rewrite: no lost predicates, deterministic (no DB)
-│   │   └── test_db_regression.py  # DB security guards against the job database
+│   ├── tests/              # Plain scripts; "(DB)" ones need the job database
+│   │   ├── test_rewrite.py          # Comma-join rewrite keeps every predicate, deterministic
+│   │   ├── test_sql_guards.py       # Single-statement check, query allowlist, benchmark DDL allowlist
+│   │   ├── test_db_regression.py    # (DB) Read-only transaction, timeouts, pool, session reset
+│   │   ├── test_plan_table.py       # Plan flattening, q-error, processes under Gather
+│   │   ├── test_estimates.py        # Origins, consequences, Memoize, parallel time share
+│   │   ├── test_small_tables.py     # Small-table filter
+│   │   ├── test_analyze_step.py     # Step 3 ANALYZE only for expression indexes
+│   │   ├── test_issue_parsing.py    # Issues linked to plan nodes
+│   │   ├── test_invalid_indexes.py  # Dropping / feeding back indexes the schema rejects
+│   │   └── test_index_check.py      # (DB) hypopg schema check + review_advice retry
+│   ├── scripts/            # Saved JOB 11d plans used as test fixtures, CSV import helper
 │   ├── eval/
 │   │   ├── run_eval.py     # Eval harness: B1/B2/combined baselines + surgeon metrics
 │   │   ├── summarize.py    # Per-run summary table + aggregate stats
@@ -393,7 +464,7 @@ SQL-Surgeon/
 
 ### Prerequisites
 
-- PostgreSQL 17 instance with `hypopg` and `pg_trgm` extensions installed
+- PostgreSQL 17 instance with the `pg_trgm` and `hypopg` extensions (`hypopg` is required for the eval harness; without it, the schema check of recommended indexes is skipped)
 - Google Gemini API key (paid tier for `gemini-2.5-pro`)
 - Python 3.12+, Node.js 18+
 
@@ -444,6 +515,15 @@ python -m eval.compare <baseline_run_id> <current_run_id>
 
 Results are written to `eval/results/{RUN_ID}/`.
 
+### 5. Run tests
+
+Each test file is a plain script that prints `PASS` / `FAIL` per check and exits non-zero on failure. Most need no database; `test_db_regression.py` and `test_index_check.py` need the `job` database (with hypopg) and `.env`.
+
+```bash
+cd backend
+for t in tests/test_*.py; do echo "== $t"; python "$t" | tail -1; done
+```
+
 ---
 
 ## API
@@ -463,14 +543,22 @@ Results are written to `eval/results/{RUN_ID}/`.
 ```json
 {
   "status": "success",
-  "issues": ["Sequential scan on orders — no index on status column"],
-  "advice": ["Create a composite index on (status, created_at DESC)"],
-  "optimized_sql": "-- Step 1: Create indexes (run once)\nCREATE INDEX ...\n\n-- Step 2: Run the optimized query\nSELECT ...",
+  "rewrite_warnings": ["SELECT * detected — list only the columns your application needs ..."],
   "explain_output": [...],
+  "plan_table": [{"id": 0, "op": "Limit", "plan_rows": 100, "actual_rows": 100, "loops": 1, "q_error": 1.0, ...}, ...],
+  "estimate_analysis": {"origins": [{"id": 3, "q_error": 4210.0, "direction": "under", "child_max_q": 1.0}], "consequences": []},
+  "issues": ["Sequential scan on orders — no index on status column"],
+  "issue_node_ids": [[3]],
+  "advice": ["Create a composite index on (status, created_at DESC)"],
+  "filtered_indexes": [{"ddl": "CREATE INDEX idx_orders_status_created ON orders (status, created_at DESC);", "reason": "..."}],
+  "execution_time_ms": 812.4,
+  "optimized_sql": "-- Step 1: Create indexes (run once)\nCREATE INDEX ...\n\n-- Step 2: Run the optimized query\nSELECT ...",
   "benchmark_result": null,
   "error": null
 }
 ```
+
+`plan_table` ids are what `estimate_analysis` and `issue_node_ids` refer to. The frontend shows the result in tabs: **Summary** (recommendations), **Diagnosis** (the plan table with misestimate origins and consequences marked; clicking an issue highlights its nodes) and **Database changes** (each index with its reason, and the full script to copy). A **SQL changes** tab for query/application-level suggestions is a placeholder for now.
 
 When `run_benchmark: true`, `benchmark_result` contains an `EXPLAIN ANALYZE` result from the sandbox benchmark (all tables in the query are copied to the sandbox schema).
 
@@ -511,7 +599,7 @@ Connections come from a bounded `ThreadedConnectionPool` (`SURGEON_DB_POOL_MAX`)
 | `SURGEON_DB_POOL_MIN` / `SURGEON_DB_POOL_MAX` | `1` / `10` | Pool bounds for the read-only connection |
 | `SURGEON_SMALL_TABLE_BYTES` | `65536` (64 kB) | Tables smaller than this (`pg_relation_size`) never get an index suggestion; skipped indexes are reported in `rewrite_warnings` |
 
-> **Note:** 5 s is too short for many JOB queries on the full 12M-row IMDb dataset. For the eval harness, raise it, e.g. `SURGEON_STATEMENT_TIMEOUT_MS=120000 python -m eval.run_eval`.
+> **Note:** 5 s is too short for many JOB queries on the full IMDb dataset. For the eval harness, raise it, e.g. `SURGEON_STATEMENT_TIMEOUT_MS=120000 python -m eval.run_eval`.
 
 ### Setting up the restricted role
 
@@ -542,10 +630,15 @@ Then set `SURGEON_READONLY_DATABASE_URL` to the new role and restart the backend
 
 ### What is *not* covered by the read-only path
 
-Two features still use the privileged `DATABASE_URL` because they need to write:
+Only the sandbox benchmark (`run_benchmark: true`, `benchmark_in_sandbox`) uses the privileged `DATABASE_URL`, because it has to create a schema, copy data and build the suggested indexes. Its guards:
 
-- **`run_benchmark: true`** (`benchmark_in_sandbox`) creates a schema, copies data, and executes the **LLM-generated** `optimized_sql`. A prompt-injected query could steer that DDL, so leave `run_benchmark` off for untrusted users, or point `DATABASE_URL` at a disposable replica.
-- **`run_explain`'s PK index check** can run `CREATE INDEX` on your tables when a primary-key column has no index.
+- Everything runs in **one transaction that is always rolled back**: the schema, the copies and the indexes never reach the database.
+- The **LLM-generated** script is allowlisted: only `CREATE INDEX` / `ANALYZE` on unqualified (sandbox) tables and `CREATE EXTENSION` for `pg_trgm`, `btree_gin`, `btree_gist`. Anything else is rejected before running.
+- The original query must pass the single-statement check and the query-only allowlist; table and schema names are quoted.
+
+What is still open: the original query itself runs with `DATABASE_URL` privileges, so a side effect outside the transaction isn't undone by the rollback ([#1](https://github.com/RachelHuangZW/SQL-Surgeon/issues/1)). Leave `run_benchmark` off for untrusted input, or point `DATABASE_URL` at a disposable replica.
+
+Everything else (`run_explain`'s plan, metadata and primary-key lookups, the hypopg schema check) runs on the read-only path and never writes. Earlier versions created missing primary-key indexes here; that was removed — a table without a primary key is now only reported.
 
 ### Production checklist
 

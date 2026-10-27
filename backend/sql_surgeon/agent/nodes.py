@@ -1,5 +1,5 @@
 from .state import AgentState
-from ..db.client import DBClient, split_statements
+from ..db.client import DBClient, UNVERIFIED, split_statements
 from ..plan.table import flatten_plan, format_plan_for_llm
 from .prompts import ANALYSIS_PROMPT
 from .prompts import ADVICE_PROMPT
@@ -8,6 +8,7 @@ from ..plan.estimates import analyze_estimates, format_estimates_for_llm
 
 import re
 import json
+import logging
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -16,6 +17,7 @@ import os
 
 load_dotenv()
 api_key = os.getenv("GOOGLE_API_KEY")
+logger = logging.getLogger(__name__)
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-pro", google_api_key=api_key, temperature=0.0, timeout=60
@@ -24,6 +26,10 @@ llm = ChatGoogleGenerativeAI(
 # Tables whose heap file is under this many bytes never get an index suggestion: a Seq Scan reads the
 # whole table in a handful of pages, while one index lookup already costs several random page reads.
 SMALL_TABLE_BYTES = int(os.getenv("SURGEON_SMALL_TABLE_BYTES", "65536"))
+
+# route_after_review ends the loop once retry_count reaches this; review_advice uses it to know whether a
+# retry it asks for will actually happen.
+MAX_RETRY_COUNT = 2
 
 
 def _parse_from_tables(from_clause: str) -> list:
@@ -353,6 +359,112 @@ def small_table_warnings(skipped: list, small_tables: dict) -> list:
     return warnings
 
 
+def ddl_key(ddl: str) -> str:
+    """Whitespace-, case- and trailing-semicolon-insensitive form of a statement, so the same DDL
+    matches in the index list and in the script."""
+    return " ".join(ddl.split()).rstrip(";").strip().lower()
+
+
+def recommended_index_ddls(indexes: list, script: str) -> list:
+    """Every distinct CREATE INDEX in the index list and the script, in order of first appearance."""
+    candidates = [idx.get("ddl", "") for idx in indexes or []]
+    for statement in split_statements(script or ""):
+        candidates.append(statement[_LEADING_COMMENTS.match(statement).end():].rstrip())
+    ddls, seen = [], set()
+    for ddl in candidates:
+        key = ddl_key(ddl)
+        if index_target_table(ddl) and key not in seen:
+            seen.add(key)
+            ddls.append(ddl)
+    return ddls
+
+
+def find_invalid_indexes(ddls: list) -> dict:
+    """{ddl_key: PostgreSQL's error} for the recommended indexes the real schema rejects.
+
+    Best effort: if the check itself can't run, nothing is reported invalid rather than failing the analysis.
+    """
+    if not ddls:
+        return {}
+    try:
+        results = DBClient(os.getenv("DATABASE_URL")).check_index_ddls(ddls)
+    except Exception as e:
+        logger.warning(f"Could not validate recommended indexes against the schema: {e}")
+        return {}
+    return {ddl_key(ddl): error for ddl, error in results.items() if error not in (None, UNVERIFIED)}
+
+
+def drop_invalid_indexes(indexes: list, invalid: dict) -> tuple:
+    """Split [{ddl, reason}, ...] into (kept, dropped); dropped is [(ddl, error), ...]."""
+    kept, dropped = [], []
+    for idx in indexes or []:
+        error = invalid.get(ddl_key(idx.get("ddl", "")))
+        if error:
+            dropped.append((idx["ddl"], error))
+        else:
+            kept.append(idx)
+    return kept, dropped
+
+
+def drop_invalid_statements(script: str, invalid: dict) -> tuple:
+    """Remove the invalid CREATE INDEX statements from the script; return (script, dropped)."""
+    script = script or ""
+    dropped = []
+    for statement in split_statements(script):
+        body = statement[_LEADING_COMMENTS.match(statement).end():].rstrip()
+        error = invalid.get(ddl_key(body))
+        if error:
+            # ";?" so the script's last statement goes too when the LLM left off its semicolon
+            script = re.sub(re.escape(body) + r"\s*;?[ \t]*\n?", "", script, count=1)
+            dropped.append((body + ";", error))
+    return script, dropped
+
+
+def invalid_index_warnings(dropped: list) -> list:
+    """One user-facing warning per distinct dropped index."""
+    warnings, seen = [], set()
+    for ddl, error in dropped:
+        key = ddl_key(ddl)
+        if key in seen:
+            continue
+        seen.add(key)
+        warnings.append(
+            f"Dropped a recommended index that doesn't match the database schema: "
+            f"{' '.join(ddl.split()).rstrip(';')}; PostgreSQL says: {error.removeprefix('hypopg: ')}"
+        )
+    return warnings
+
+
+def invalid_index_feedback(dropped: list, metadata: dict) -> str:
+    """Retry feedback for generate_advice: each rejected index, PostgreSQL's reason and the table's real columns.
+
+    generate_advice is never given the DDL, so without the column list a retry would only guess again.
+    metadata is DBClient.get_table_metadata output for the tables involved.
+    """
+    lines, seen = [], set()
+    for ddl, error in dropped:
+        key = ddl_key(ddl)
+        if key in seen:
+            continue
+        seen.add(key)
+        table = index_target_table(ddl)
+        info = metadata.get(table)
+        schema = (f"Columns of {table}: {', '.join(col[0] for col in info['columns'])}." if info
+                  else f"Table {table} does not exist.")
+        lines.append(f"- {' '.join(ddl.split()).rstrip(';')}; → {error.removeprefix('hypopg: ')}. {schema}")
+    return ("These recommended indexes were rejected by PostgreSQL because they reference tables or columns "
+            "that don't exist. Use only real columns:\n" + "\n".join(lines))
+
+
+def fetch_table_metadata(tables) -> dict:
+    """get_table_metadata for the given tables; {} if the lookup fails (feedback then just lacks the column list)."""
+    try:
+        return DBClient(os.getenv("DATABASE_URL")).get_table_metadata(sorted(t for t in tables if t))
+    except Exception as e:
+        logger.warning(f"Could not fetch table metadata for retry feedback: {e}")
+        return {}
+
+
 def strip_code_block(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
@@ -666,6 +778,29 @@ def review_advice(state: AgentState):
         )
         filtered_sql, skipped_sql = drop_small_table_statements(filtered_sql, small_tables)
 
+        # Hard guarantee: never hand out an index PostgreSQL would reject. LLMs invent columns from their
+        # training data (IMDb's tconst, issue #9) and the reviewer is an LLM too, so the check is hypopg
+        # against the real schema. Index types hypopg can't simulate (GIN, ...) are kept unchecked.
+        invalid = find_invalid_indexes(recommended_index_ddls(final_indexes + reviewed_indexes, filtered_sql))
+        final_indexes, dropped = drop_invalid_indexes(final_indexes, invalid)
+        reviewed_indexes, dropped_reviewed = drop_invalid_indexes(reviewed_indexes, invalid)
+        filtered_sql, dropped_sql = drop_invalid_statements(filtered_sql, invalid)
+        rejected = dropped + dropped_reviewed + dropped_sql
+
+        # Rejected indexes: while a retry is left, send the advice back with PostgreSQL's errors and the
+        # real columns instead of only dropping them; the dropped versions above are what's kept otherwise.
+        verdict, feedback = result["verdict"], result["feedback"]
+        if rejected:
+            if verdict != "retry" and new_retry_count + 1 < MAX_RETRY_COUNT:
+                verdict = "retry"
+                new_retry_count += 1
+            if verdict == "retry":
+                tables = {index_target_table(ddl) for ddl, _ in rejected}
+                feedback = "\n\n".join(
+                    part for part in (feedback, invalid_index_feedback(rejected, fetch_table_metadata(tables))) if part
+                )
+        retrying = verdict == "retry" and new_retry_count < MAX_RETRY_COUNT
+
         analyze_stmt = _build_analyze_statement(reviewed_indexes)
         if analyze_stmt:
             filtered_sql = (filtered_sql or "") + "\n\n" + analyze_stmt
@@ -675,10 +810,14 @@ def review_advice(state: AgentState):
         for warning in small_table_warnings(skipped + skipped_fallback + skipped_sql, small_tables):
             if warning not in warnings:
                 warnings.append(warning)
+        # Only when this attempt is final: on a retry the user never sees these indexes
+        for warning in [] if retrying else invalid_index_warnings(rejected):
+            if warning not in warnings:
+                warnings.append(warning)
 
         return {
-            "verdict": result["verdict"],
-            "feedback": result["feedback"],
+            "verdict": verdict,
+            "feedback": feedback,
             "filtered_indexes": final_indexes,
             "optimized_sql": inject_extension_deps(filtered_sql),
             "rewrite_warnings": warnings,

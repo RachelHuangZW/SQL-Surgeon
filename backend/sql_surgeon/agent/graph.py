@@ -7,6 +7,7 @@ from .nodes import (
     identify_issues,
     generate_advice,
     review_advice,
+    MAX_RETRY_COUNT,
     generate_benchmark_schema
 )
 
@@ -25,7 +26,7 @@ def should_continue(state: AgentState):
 def route_after_review(state: AgentState):
     if state.get("error"):
         return "end"
-    if (state.get("retry_count") or 0) >= 2:
+    if (state.get("retry_count") or 0) >= MAX_RETRY_COUNT:
         return "end"
     if state.get("verdict") == "retry":
         return "retry"

@@ -16,6 +16,8 @@
 --   -v all_schemas=on           Also grant SELECT on future tables in ALL schemas, not just public.
 --   -v revoke_from_public=on    Also revoke dblink / postgres_fdw function EXECUTE from PUBLIC
 --                               (database-wide; affects every role, read the note in section 6).
+--   -v sb_password='change-me'  Also create/update `sql_surgeon_sandbox`, the login behind
+--                               SURGEON_SANDBOX_DATABASE_URL that the sandbox benchmark needs (section 8).
 --
 -- Safe to re-run: every statement is idempotent.
 -- =============================================================================
@@ -173,6 +175,58 @@ $$;
 \endif
 \endif
 
+-- -----------------------------------------------------------------------------
+-- 8. Sandbox benchmark role (only with -v sb_password=...)
+-- -----------------------------------------------------------------------------
+-- The benchmark builds a temporary schema, copies tables into it, creates the suggested
+-- indexes and runs EXPLAIN ANALYZE, all in one transaction that is always rolled back.
+-- It must log in as a low-privilege role: a rollback can't undo side effects outside the
+-- transaction, and SET ROLE from a privileged login is no boundary (the query can switch
+-- back with set_config('role', ...)). So: CREATE on the database for the schema, SELECT on
+-- public to copy from, nothing else.
+\if :{?sb_password}
+SELECT NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'sql_surgeon_sandbox') AS need_sb_role \gset
+\if :need_sb_role
+  CREATE ROLE sql_surgeon_sandbox;
+\endif
+
+ALTER ROLE sql_surgeon_sandbox WITH
+    LOGIN
+    PASSWORD :'sb_password'
+    NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS
+    CONNECTION LIMIT 5;
+-- Backstops for direct logins; the benchmark sets its own timeouts per transaction
+ALTER ROLE sql_surgeon_sandbox SET statement_timeout = '300s';
+ALTER ROLE sql_surgeon_sandbox SET idle_in_transaction_session_timeout = '60s';
+
+REVOKE ALL ON DATABASE :"target_db" FROM sql_surgeon_sandbox;
+GRANT CONNECT, CREATE ON DATABASE :"target_db" TO sql_surgeon_sandbox;   -- CREATE = the sandbox schema
+
+REVOKE ALL ON SCHEMA public FROM sql_surgeon_sandbox;
+GRANT USAGE ON SCHEMA public TO sql_surgeon_sandbox;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM sql_surgeon_sandbox;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO sql_surgeon_sandbox;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM sql_surgeon_sandbox;
+ALTER DEFAULT PRIVILEGES FOR ROLE :"owner_role" IN SCHEMA public
+    GRANT SELECT ON TABLES TO sql_surgeon_sandbox;
+
+DO $$
+DECLARE
+    r text;
+BEGIN
+    FOR r IN
+        SELECT rolname FROM pg_roles
+        WHERE rolname IN ('pg_write_all_data', 'pg_signal_backend', 'pg_read_server_files',
+                          'pg_write_server_files', 'pg_execute_server_program', 'pg_checkpoint')
+        AND pg_has_role('sql_surgeon_sandbox', oid, 'MEMBER')
+    LOOP
+        EXECUTE format('REVOKE %I FROM sql_surgeon_sandbox', r);
+        RAISE NOTICE 'Revoked membership in %', r;
+    END LOOP;
+END
+$$;
+\endif
+
 COMMIT;
 
 -- -----------------------------------------------------------------------------
@@ -189,3 +243,17 @@ SELECT
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = 'public' AND c.relkind IN ('r', 'v', 'm', 'p');
+
+\if :{?sb_password}
+\echo 'Verifying sql_surgeon_sandbox privileges (expected: t, f, f, t, f):'
+SELECT
+    bool_and(has_table_privilege('sql_surgeon_sandbox', c.oid, 'SELECT'))  AS can_select_all_public,
+    bool_or(has_table_privilege('sql_surgeon_sandbox', c.oid, 'INSERT,UPDATE,DELETE,TRUNCATE')) AS can_write_any_public,
+    has_schema_privilege('sql_surgeon_sandbox', 'public', 'CREATE')         AS can_create_in_public,
+    has_database_privilege('sql_surgeon_sandbox', current_database(), 'CREATE') AS can_create_schema,
+    (SELECT rolsuper OR rolcreatedb OR rolcreaterole OR rolbypassrls
+       FROM pg_roles WHERE rolname = 'sql_surgeon_sandbox')               AS has_elevated_attrs
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'public' AND c.relkind IN ('r', 'v', 'm', 'p');
+\endif

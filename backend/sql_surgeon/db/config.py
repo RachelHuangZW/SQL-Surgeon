@@ -12,6 +12,8 @@ class DBSecurityConfig:
     lock_timeout_ms: int
     pool_min: int
     pool_max: int
+    # Dedicated low-privilege login for the sandbox benchmark. None -> the benchmark refuses to run.
+    sandbox_dsn: Optional[str]
 
 
 def _int_env(name: str, default: int, minimum: int) -> int:
@@ -36,4 +38,5 @@ def load_security_config() -> DBSecurityConfig:
         lock_timeout_ms=_int_env("SURGEON_LOCK_TIMEOUT_MS", 2000, minimum=1),
         pool_min=_int_env("SURGEON_DB_POOL_MIN", 1, minimum=0),
         pool_max=_int_env("SURGEON_DB_POOL_MAX", 10, minimum=1),
+        sandbox_dsn=os.getenv("SURGEON_SANDBOX_DATABASE_URL") or None
     )

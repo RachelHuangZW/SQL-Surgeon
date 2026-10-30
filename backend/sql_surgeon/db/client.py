@@ -28,6 +28,8 @@ _warned_no_readonly_dsn = False
 
 logger = logging.getLogger(__name__)
 
+UNVERIFIED = "unverified"   # hypopg can't check it (e.g. GIN) or isn't installed: keep the index, don't claim it's valid
+
 
 def _get_pool(dsn: str, minconn: int, maxconn: int) -> pool.ThreadedConnectionPool:
     with _pools_lock:
@@ -150,6 +152,8 @@ _CREATE_INDEX = re.compile(
     rf"(?:(?:IF\s+NOT\s+EXISTS\s+)?{_IDENT}\s+)?ON\s+(?:ONLY\s+)?{_IDENT}\s*(?:USING\s+\w+\s*)?\(",
     re.IGNORECASE,
 )
+# For validating recommendations: any CREATE INDEX (schema-qualified names are fine); hypopg checks the rest.
+_CREATE_INDEX_ANY = re.compile(r"CREATE\s+(?:UNIQUE\s+)?INDEX\b", re.IGNORECASE)
 _SANDBOX_EXTENSIONS = r"(?:pg_trgm|btree_gin|btree_gist)"
 _CREATE_EXTENSION = re.compile(
     rf'CREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:{_SANDBOX_EXTENSIONS}|"{_SANDBOX_EXTENSIONS}")\s*',
@@ -323,6 +327,49 @@ class DBClient:
 
         return metadata
         
+    
+    def check_index_ddls(self, ddls: list) -> dict:
+        """Return {ddl: None | error message | UNVERIFIED} for recommended CREATE INDEX statements.
+
+        Uses hypopg, so PostgreSQL's own parser checks tables, columns, expressions and operator
+        classes without building anything. Runs in the read-only transaction.
+        """
+        results = {}
+        if not ddls:
+            return results
+        with self._readonly_transaction() as conn:
+            with conn.cursor() as cur:
+                # Checked up front: if hypopg is missing, even hypopg_reset() in the finally below would fail
+                cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'hypopg'")
+                hypopg_installed = cur.fetchone() is not None
+                try:
+                    for ddl in ddls:
+                        # LLM output: only ever hand hypopg a single CREATE INDEX statement
+                        statements = split_statements(ddl)
+                        body = statements[0][_LEADING_COMMENTS.match(statements[0]).end():] if len(statements) == 1 else ""
+                        if not _CREATE_INDEX_ANY.match(body):
+                            results[ddl] = "not a single CREATE INDEX statement"
+                            continue
+                        if not hypopg_installed:
+                            results[ddl] = UNVERIFIED
+                            continue
+                        # One failed statement aborts the whole transaction; the savepoint keeps the batch going
+                        cur.execute("SAVEPOINT check_index")
+                        try:
+                            cur.execute("SELECT * FROM hypopg_create_index(%s)", (body,))
+                            results[ddl] = None
+                        except psycopg2.Error as e:
+                            cur.execute("ROLLBACK TO SAVEPOINT check_index")
+                            message = str(e).splitlines()[0]
+                            # GIN / GiST / BRIN: hypopg can't simulate the access method, so it can't tell either way
+                            results[ddl] = UNVERIFIED if "is not supported" in message else message
+                finally:
+                    # Hypothetical indexes live in the session, not the transaction: neither ROLLBACK nor the
+                    # pool's DISCARD ALL removes them, and the next borrower's plain EXPLAIN would use them.
+                    if hypopg_installed:
+                        cur.execute("SELECT hypopg_reset()")
+        return results
+    
         
     def _run_user_sql(self, query: str, fetch):
         """Run validated user SQL in a READ ONLY transaction and return fetch(cursor).

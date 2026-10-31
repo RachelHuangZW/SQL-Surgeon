@@ -34,7 +34,7 @@ preprocess_sql → rewrite_sql → run_explain → identify_issue → generate_a
 | `identify_issue` | LLM reads the plan table, DDL and misestimate analysis, returns specific bottlenecks, each linked to the plan nodes it is about (`issue_node_ids`) |
 | `generate_advice` | LLM produces recommendations, index DDL with a reason for each, and a two-step script (`-- Step 1` indexes, `-- Step 2` the query). On a retry, the review feedback is in its prompt. It is **not** given the DDL. |
 | `review_advice` | LLM acts as a senior DBA reviewer (`pass` / `retry` + feedback), then the deterministic guarantees below run on its output |
-| `generate_benchmark_schema` | Copies ≤100k rows of each table in the query into a temporary schema, applies the suggested indexes, runs `EXPLAIN ANALYZE` — all in one transaction that is always rolled back |
+| `generate_benchmark_schema` | Logs in as the low-privilege `sql_surgeon_sandbox` role, copies ≤100k rows of each table in the query into a temporary schema, applies the suggested indexes, runs `EXPLAIN ANALYZE` — all in one transaction that is always rolled back (see [Security](#the-sandbox-benchmark)) |
 
 **Deterministic guarantees in `review_advice`** (applied whatever the LLMs said):
 
@@ -367,10 +367,9 @@ All cost values are PostgreSQL's internal planner estimates. Actual runtime requ
 
 The user-facing `generate_benchmark_schema` copies only ≤100k rows. For LIKE queries on large text columns, GIN index adoption may not be visible in the sandbox because planner statistics differ from the real table.
 
-### 6. The sandbox benchmark has two open issues
+### 6. Suggested trigram GIN indexes fail to build in the sandbox
 
-- It runs the original query with `DATABASE_URL` privileges, so side effects outside the transaction (e.g. `pg_terminate_backend`) aren't undone by its rollback ([#1](https://github.com/RachelHuangZW/SQL-Surgeon/issues/1)). Until fixed, don't enable `run_benchmark` for untrusted input.
-- Suggested `pg_trgm` GIN indexes fail to build in the sandbox because its `search_path` excludes `public` ([#2](https://github.com/RachelHuangZW/SQL-Surgeon/issues/2)).
+Suggested `pg_trgm` GIN indexes fail to build in the sandbox benchmark because its `search_path` excludes `public` ([#2](https://github.com/RachelHuangZW/SQL-Surgeon/issues/2)).
 
 ### 7. GIN/GiST/BRIN recommendations are not checked against the schema
 
@@ -431,7 +430,8 @@ SQL-Surgeon/
 │   │   ├── test_analyze_step.py     # Step 3 ANALYZE only for expression indexes
 │   │   ├── test_issue_parsing.py    # Issues linked to plan nodes
 │   │   ├── test_invalid_indexes.py  # Dropping / feeding back indexes the schema rejects
-│   │   └── test_index_check.py      # (DB) hypopg schema check + review_advice retry
+│   │   ├── test_index_check.py      # (DB) hypopg schema check + review_advice retry
+│   │   └── test_sandbox_benchmark.py  # (DB) Sandbox login refusals; escapes denied under sql_surgeon_sandbox
 │   ├── scripts/            # Saved JOB 11d plans used as test fixtures, CSV import helper
 │   ├── eval/
 │   │   ├── run_eval.py     # Eval harness: B1/B2/combined baselines + surgeon metrics
@@ -453,7 +453,7 @@ SQL-Surgeon/
 │   ├── timeout_design.md   # Three-layer timeout design rationale
 │   └── pg_index_types.md
 ├── scripts/
-│   └── setup_security_role.sql  # Creates the sql_surgeon_readonly role
+│   └── setup_security_role.sql  # Creates the sql_surgeon_readonly (and, optionally, sql_surgeon_sandbox) role
 ├── requirements.txt
 └── .env                    # DATABASE_URL + GOOGLE_API_KEY (not committed)
 ```
@@ -486,6 +486,9 @@ GOOGLE_API_KEY=your_gemini_api_key
 
 # Recommended: least-privilege connection for running user SQL (see Security)
 SURGEON_READONLY_DATABASE_URL=postgresql://sql_surgeon_readonly:password@localhost:5432/yourdb
+
+# Only needed for run_benchmark: true; without it the benchmark refuses to run (see Security)
+SURGEON_SANDBOX_DATABASE_URL=postgresql://sql_surgeon_sandbox:password@localhost:5432/yourdb
 ```
 
 ### 3. Run
@@ -517,7 +520,7 @@ Results are written to `eval/results/{RUN_ID}/`.
 
 ### 5. Run tests
 
-Each test file is a plain script that prints `PASS` / `FAIL` per check and exits non-zero on failure. Most need no database; `test_db_regression.py` and `test_index_check.py` need the `job` database (with hypopg) and `.env`.
+Each test file is a plain script that prints `PASS` / `FAIL` per check and exits non-zero on failure. Most need no database; `test_db_regression.py`, `test_index_check.py` and `test_sandbox_benchmark.py` need the `job` database (with hypopg) and `.env`. `test_sandbox_benchmark.py` skips its last section unless `SURGEON_SANDBOX_DATABASE_URL` is set.
 
 ```bash
 cd backend
@@ -560,7 +563,7 @@ for t in tests/test_*.py; do echo "== $t"; python "$t" | tail -1; done
 
 `plan_table` ids are what `estimate_analysis` and `issue_node_ids` refer to. The frontend shows the result in tabs: **Summary** (recommendations), **Diagnosis** (the plan table with misestimate origins and consequences marked; clicking an issue highlights its nodes) and **Database changes** (each index with its reason, and the full script to copy). A **SQL changes** tab for query/application-level suggestions is a placeholder for now.
 
-When `run_benchmark: true`, `benchmark_result` contains an `EXPLAIN ANALYZE` result from the sandbox benchmark (all tables in the query are copied to the sandbox schema).
+When `run_benchmark: true`, `benchmark_result` contains an `EXPLAIN ANALYZE` result from the sandbox benchmark (all tables in the query are copied to the sandbox schema). It needs `SURGEON_SANDBOX_DATABASE_URL`; without it, `error` says so and `benchmark_result` stays `null`.
 
 ### `GET /api/health`
 
@@ -594,6 +597,7 @@ Connections come from a bounded `ThreadedConnectionPool` (`SURGEON_DB_POOL_MAX`)
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `SURGEON_READONLY_DATABASE_URL` | *(falls back to `DATABASE_URL` with a warning)* | Connection used for user SQL. Point it at `sql_surgeon_readonly`. |
+| `SURGEON_SANDBOX_DATABASE_URL` | *(none: the benchmark refuses to run)* | Login for the sandbox benchmark. Point it at `sql_surgeon_sandbox`; a superuser or privileged login is rejected. No fallback to `DATABASE_URL`. |
 | `SURGEON_STATEMENT_TIMEOUT_MS` | `5000` | Maximum run time of one analyzed query |
 | `SURGEON_LOCK_TIMEOUT_MS` | `2000` | Maximum wait for a lock |
 | `SURGEON_DB_POOL_MIN` / `SURGEON_DB_POOL_MAX` | `1` / `10` | Pool bounds for the read-only connection |
@@ -608,10 +612,13 @@ Run [scripts/setup_security_role.sql](scripts/setup_security_role.sql) once per 
 ```bash
 psql "$ADMIN_DATABASE_URL" \
      -v ro_password='a-strong-password' \
+     -v sb_password='another-strong-password' \
      -f scripts/setup_security_role.sql
 ```
 
-The script is idempotent and ends by printing a verification row (expected `t | f | f | f | f`). It:
+`-v sb_password` is optional: it also creates `sql_surgeon_sandbox` for the [sandbox benchmark](#the-sandbox-benchmark). Re-running the script resets each role's password to the value you pass, so pass the ones in your `.env`.
+
+The script is idempotent and ends by printing a verification row per role (expected `t | f | f | f | f` for `sql_surgeon_readonly`, `t | f | f | t | f` for `sql_surgeon_sandbox`). For `sql_surgeon_readonly` it:
 
 - creates `sql_surgeon_readonly` with `LOGIN` only (`NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, connection limit 20);
 - grants `CONNECT`, `USAGE` on `public`, and `SELECT` on existing and future tables in `public`, and revokes every other table and sequence privilege;
@@ -628,15 +635,25 @@ Optional flags:
 
 Then set `SURGEON_READONLY_DATABASE_URL` to the new role and restart the backend. If the `WARNING: SURGEON_READONLY_DATABASE_URL not set` log line no longer appears, the backend is using it.
 
-### What is *not* covered by the read-only path
+### The sandbox benchmark
 
-Only the sandbox benchmark (`run_benchmark: true`, `benchmark_in_sandbox`) uses the privileged `DATABASE_URL`, because it has to create a schema, copy data and build the suggested indexes. Its guards:
+The sandbox benchmark (`run_benchmark: true`, `benchmark_in_sandbox`) is the one path that can't be read-only: it creates a schema, copies data and builds the suggested indexes. So it logs in as its own role, `sql_surgeon_sandbox` (`SURGEON_SANDBOX_DATABASE_URL`), which the setup script creates with `-v sb_password=...`:
 
+- `CONNECT` + `CREATE` on the database (for the sandbox schema), `USAGE` + `SELECT` on `public` (to copy from), nothing else: no write on any real table, no `CREATE` in `public`, `NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS`, connection limit 5;
+- no membership in `pg_write_all_data`, `pg_signal_backend`, `pg_read_server_files`, `pg_write_server_files`, `pg_execute_server_program`, `pg_checkpoint`;
+- role defaults `statement_timeout = 300s`, `idle_in_transaction_session_timeout = 60s` as a backstop.
+
+Why a separate **login** and not `SET ROLE` from `DATABASE_URL`: a rollback can't undo side effects outside the transaction (`pg_terminate_backend` on another session), and `SET ROLE` is no boundary, because the query can switch back with `set_config('role', 'postgres', true)` whenever the login role is allowed to. Verified: from a superuser login, a `SET LOCAL ROLE` sandbox was escaped this way and another session terminated ([#1](https://github.com/RachelHuangZW/SQL-Surgeon/issues/1)). Only the login identity holds.
+
+Its guards, on top of the role:
+
+- No fallback: without `SURGEON_SANDBOX_DATABASE_URL` it raises `SandboxNotConfiguredError` instead of using `DATABASE_URL`.
+- Before running anything it checks `session_user` and refuses a superuser or a member of the roles above, in case the URL points at the wrong login.
 - Everything runs in **one transaction that is always rolled back**: the schema, the copies and the indexes never reach the database.
 - The **LLM-generated** script is allowlisted: only `CREATE INDEX` / `ANALYZE` on unqualified (sandbox) tables and `CREATE EXTENSION` for `pg_trgm`, `btree_gin`, `btree_gist`. Anything else is rejected before running.
 - The original query must pass the single-statement check and the query-only allowlist; table and schema names are quoted.
 
-What is still open: the original query itself runs with `DATABASE_URL` privileges, so a side effect outside the transaction isn't undone by the rollback ([#1](https://github.com/RachelHuangZW/SQL-Surgeon/issues/1)). Leave `run_benchmark` off for untrusted input, or point `DATABASE_URL` at a disposable replica.
+`tests/test_sandbox_benchmark.py` checks that a data-modifying CTE on a real table, `pg_terminate_backend` on another session and `set_config('role', ...)` are all denied under this role.
 
 Everything else (`run_explain`'s plan, metadata and primary-key lookups, the hypopg schema check) runs on the read-only path and never writes. Earlier versions created missing primary-key indexes here; that was removed — a table without a primary key is now only reported.
 
@@ -644,10 +661,11 @@ Everything else (`run_explain`'s plan, metadata and primary-key lookups, the hyp
 
 - **Never** point `DATABASE_URL` or `SURGEON_READONLY_DATABASE_URL` at a primary with real customer data. Use a read replica or a restored snapshot. `EXPLAIN ANALYZE` consumes real CPU and I/O.
 - Always set `SURGEON_READONLY_DATABASE_URL`. The fallback keeps layers 1–5 but loses role isolation.
+- Set `SURGEON_SANDBOX_DATABASE_URL` only if you use `run_benchmark`, and only to `sql_surgeon_sandbox`. The benchmark still really runs the user's query, so give it a replica or snapshot too.
 - Keep `SURGEON_STATEMENT_TIMEOUT_MS` as low as your workload allows, and size `SURGEON_DB_POOL_MAX` below the role's `CONNECTION LIMIT`.
 - Restrict the API: CORS is currently `allow_origins=["*"]` and there is no authentication. Put the backend behind auth and rate limiting before exposing it.
 - Require TLS (`?sslmode=require` or stricter) for remote databases, and keep credentials in a secrets manager, not in `.env` on shared hosts.
-- Monitor sessions with `application_name = 'sql_surgeon_readonly'` in `pg_stat_activity`.
+- Monitor sessions with `application_name = 'sql_surgeon_readonly'` (and `'sql_surgeon_benchmark'` for the sandbox) in `pg_stat_activity`.
 
 ---
 

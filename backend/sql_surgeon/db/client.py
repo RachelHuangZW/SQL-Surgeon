@@ -21,6 +21,10 @@ class QueryTimeoutError(TimeoutError):
     """User SQL exceeded the configured statement_timeout."""
 
 
+class SandboxNotConfiguredError(RuntimeError):
+    """The sandbox benchmark was requested but SURGEON_SANDBOX_DATABASE_URL isn't set."""
+
+
 # One pool per DSN, shared across DBClient instances (nodes create a new DBClient per call).
 _pools = {}
 _pools_lock = threading.Lock()
@@ -28,6 +32,12 @@ _warned_no_readonly_dsn = False
 
 logger = logging.getLogger(__name__)
 
+UNVERIFIED = "unverified"   # hypopg can't check it (e.g. GIN) or isn't installed: keep the index, don't claim it's valid
+
+# Predefined roles whose members could act outside the sandbox: write any table, touch server files or
+# programs, or signal other sessions (pg_terminate_backend survives the benchmark's rollback).
+_SANDBOX_FORBIDDEN_ROLES = ("pg_write_all_data", "pg_signal_backend", "pg_read_server_files",
+                            "pg_write_server_files", "pg_execute_server_program")
 
 def _get_pool(dsn: str, minconn: int, maxconn: int) -> pool.ThreadedConnectionPool:
     with _pools_lock:
@@ -150,6 +160,8 @@ _CREATE_INDEX = re.compile(
     rf"(?:(?:IF\s+NOT\s+EXISTS\s+)?{_IDENT}\s+)?ON\s+(?:ONLY\s+)?{_IDENT}\s*(?:USING\s+\w+\s*)?\(",
     re.IGNORECASE,
 )
+# For validating recommendations: any CREATE INDEX (schema-qualified names are fine); hypopg checks the rest.
+_CREATE_INDEX_ANY = re.compile(r"CREATE\s+(?:UNIQUE\s+)?INDEX\b", re.IGNORECASE)
 _SANDBOX_EXTENSIONS = r"(?:pg_trgm|btree_gin|btree_gist)"
 _CREATE_EXTENSION = re.compile(
     rf'CREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:{_SANDBOX_EXTENSIONS}|"{_SANDBOX_EXTENSIONS}")\s*',
@@ -191,6 +203,7 @@ class DBClient:
         self.config = load_security_config()
         # DSN for read-only
         self.readonly_dsn = self.config.readonly_dsn or dsn
+        self.sandbox_dsn = self.config.sandbox_dsn
 
     def _warn_if_shared_dsn(self):
         global _warned_no_readonly_dsn
@@ -323,6 +336,49 @@ class DBClient:
 
         return metadata
         
+    
+    def check_index_ddls(self, ddls: list) -> dict:
+        """Return {ddl: None | error message | UNVERIFIED} for recommended CREATE INDEX statements.
+
+        Uses hypopg, so PostgreSQL's own parser checks tables, columns, expressions and operator
+        classes without building anything. Runs in the read-only transaction.
+        """
+        results = {}
+        if not ddls:
+            return results
+        with self._readonly_transaction() as conn:
+            with conn.cursor() as cur:
+                # Checked up front: if hypopg is missing, even hypopg_reset() in the finally below would fail
+                cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'hypopg'")
+                hypopg_installed = cur.fetchone() is not None
+                try:
+                    for ddl in ddls:
+                        # LLM output: only ever hand hypopg a single CREATE INDEX statement
+                        statements = split_statements(ddl)
+                        body = statements[0][_LEADING_COMMENTS.match(statements[0]).end():] if len(statements) == 1 else ""
+                        if not _CREATE_INDEX_ANY.match(body):
+                            results[ddl] = "not a single CREATE INDEX statement"
+                            continue
+                        if not hypopg_installed:
+                            results[ddl] = UNVERIFIED
+                            continue
+                        # One failed statement aborts the whole transaction; the savepoint keeps the batch going
+                        cur.execute("SAVEPOINT check_index")
+                        try:
+                            cur.execute("SELECT * FROM hypopg_create_index(%s)", (body,))
+                            results[ddl] = None
+                        except psycopg2.Error as e:
+                            cur.execute("ROLLBACK TO SAVEPOINT check_index")
+                            message = str(e).splitlines()[0]
+                            # GIN / GiST / BRIN: hypopg can't simulate the access method, so it can't tell either way
+                            results[ddl] = UNVERIFIED if "is not supported" in message else message
+                finally:
+                    # Hypothetical indexes live in the session, not the transaction: neither ROLLBACK nor the
+                    # pool's DISCARD ALL removes them, and the next borrower's plain EXPLAIN would use them.
+                    if hypopg_installed:
+                        cur.execute("SELECT hypopg_reset()")
+        return results
+    
         
     def _run_user_sql(self, query: str, fetch):
         """Run validated user SQL in a READ ONLY transaction and return fetch(cursor).
@@ -379,18 +435,45 @@ class DBClient:
     def benchmark_in_sandbox(self, table_names: list, original_sql: str, suggested_ddl: str):
         """EXPLAIN ANALYZE original_sql against copies of its tables with the suggested indexes applied.
 
-        Needs DATABASE_URL privileges (the read-only role can't create schemas), so everything runs in
-        one transaction that is always rolled back: the sandbox schema, the copies and the indexes never
-        reach the database. suggested_ddl is LLM output and goes through benchmark_setup_statements.
+        Logs in as SURGEON_SANDBOX_DATABASE_URL (sql_surgeon_sandbox: CREATE on the database, SELECT on
+        public, nothing else) and runs everything in one transaction that is always rolled back: the sandbox
+        schema, the copies and the indexes never reach the database. suggested_ddl is LLM output and goes
+        through benchmark_setup_statements.
+
+        Never a privileged login: a rollback can't undo side effects outside the transaction, and SET ROLE is
+        no boundary either, because the query can switch back with set_config('role', ...) when the login
+        role is allowed to (verified: a superuser login escaped this way and terminated another session).
         """
+        if not self.config.sandbox_dsn:
+            raise SandboxNotConfiguredError(
+                "The sandbox benchmark needs its own low-privilege login: run scripts/setup_security_role.sql "
+                "with -v sb_password=... and set SURGEON_SANDBOX_DATABASE_URL. It no longer runs as "
+                "DATABASE_URL, because that role's side effects can't be confined to the sandbox."
+            )
         statement = ensure_single_statement(original_sql)
         ensure_query_statement(statement)
         setup = benchmark_setup_statements(suggested_ddl or "")
         schema = pgsql.Identifier(f"surgeon_tmp_{uuid.uuid4().hex[:12]}")
 
-        conn = psycopg2.connect(self.dsn, application_name="sql_surgeon_benchmark")
+        conn = psycopg2.connect(self.sandbox_dsn, application_name="sql_surgeon_benchmark")
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                # Guard against a misconfigured DSN (e.g. the admin login): check what we actually logged in as
+                cursor.execute(
+                    """
+                    SELECT (SELECT rolsuper FROM pg_roles WHERE rolname = session_user) AS superuser,
+                           ARRAY(SELECT rolname FROM pg_roles
+                                 WHERE rolname = ANY(%s) AND pg_has_role(session_user, oid, 'MEMBER')) AS forbidden
+                    """,
+                    (list(_SANDBOX_FORBIDDEN_ROLES),),
+                )
+                login = cursor.fetchone()
+                if login["superuser"] or login["forbidden"]:
+                    raise UnsafeSQLError(
+                        "SURGEON_SANDBOX_DATABASE_URL must log in as a low-privilege role such as sql_surgeon_sandbox, "
+                        f"not a superuser or a member of {', '.join(login['forbidden']) or 'privileged roles'}"
+                    )
+                
                 cursor.execute("SET LOCAL statement_timeout = '300s'")  # DDL + EXPLAIN ANALYZE
                 cursor.execute("SET LOCAL lock_timeout = %s", (self.config.lock_timeout_ms,))
                 cursor.execute(pgsql.SQL("CREATE SCHEMA {}").format(schema))

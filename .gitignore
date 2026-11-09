@@ -222,6 +222,8 @@ node_modules/
 .next/
 frontend/.next/
 frontend/node_modules/
+# TypeScript incremental build cache, rewritten by every tsc run
+*.tsbuildinfo
 
 # Eval results
 backend/eval/results/

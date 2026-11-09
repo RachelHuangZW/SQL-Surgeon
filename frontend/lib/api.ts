@@ -19,6 +19,9 @@ export interface PlanRow {
   q_error: number | null   // null when the node never ran
   direction: 'ok' | 'over' | 'under' | 'not run'
   condition: string
+  sort_method: string     // '' unless a Sort / Incremental Sort
+  sort_spilled: boolean   // true if the leader or any worker sorted on disk
+  sort_disk_kb: number    // largest spill of any one process
 }
 
 // Computed by backend sql_surgeon/plan/estimates.py; every id is a PlanRow id
@@ -33,12 +36,19 @@ export interface EstimateOrigin {
 // Consequence: a slow operation caused by a misestimate
 export interface EstimateConsequence {
   id: number
-  type: 'hash_spill' | 'nested_loop_rescan'
+  type: 'hash_spill' | 'nested_loop_rescan' | 'sort_spill'
   time_share: number   // fraction of execution time (0.3 = 30%); can exceed 1 in parallel plans
   planned_batches?: number   // hash_spill only
   actual_batches?: number
   planned_loops?: number     // nested_loop_rescan only
   actual_loops?: number
+  sort_method?: string       // sort_spill only
+  disk_kb?: number
+  input_id?: number          // the Sort's input node: its row counts are complete, the Sort's own may be cut short
+  input_plan_rows?: number
+  input_actual_rows?: number
+  input_q_error?: number | null
+  input_direction?: PlanRow['direction']
 }
 
 export interface EstimateAnalysis {

@@ -1,4 +1,4 @@
-from .table import ACCURATE_Q, flatten_plan
+from .table import ACCURATE_Q, SORT_OPS, flatten_plan
 
 # q-error
 BAD_Q = 10
@@ -144,6 +144,28 @@ def find_consequences(rows, execution_time_ms):
                     "planned_loops": planned_loops,
                     "actual_loops": inner_loops,
                 })
+
+        # Consequence 3: a Sort spilled to disk in some process. Reported whatever the cause: an input far larger
+        # than estimated, or work_mem simply too small. Its share is its own time: Actual Total Time also covers
+        # reading its input, which a Sort does in full before sorting anything.
+        if row["op"] in SORT_OPS and row["sort_spilled"]:
+            children = children_map.get(row["id"], [])
+            share = time_share(row) - sum(time_share(c) for c in children)
+            if children and share >= TIME_SHARE:
+                # The Sort's own Actual Rows can be cut short by a Merge Join / Limit above it; its input can't
+                source = children[0]
+                consequences.append({
+                    "id": row["id"],
+                    "type": "sort_spill",
+                    "time_share": share,
+                    "sort_method": row["sort_method"],
+                    "disk_kb": row["sort_disk_kb"],
+                    "input_id": source["id"],
+                    "input_plan_rows": source["plan_rows"],
+                    "input_actual_rows": source["actual_rows"],
+                    "input_q_error": source["q_error"],
+                    "input_direction": source["direction"],
+                })
     return consequences
 
 
@@ -185,9 +207,19 @@ def format_estimates_for_llm(analysis, rows):
         if c["type"] == "hash_spill":
             lines.append(f"Consequence #{r['id']} {r['op']}: hash spilled to disk, batches planned "
                          f"{c['planned_batches']}, used {c['actual_batches']}; its join takes {share}")
-        else:
+        elif c["type"] == "nested_loop_rescan":
             lines.append(f"Consequence #{r['id']} {r['op']}: Nested Loop inner side ran {c['actual_loops']} times, "
                          f"planned {c['planned_loops']}; takes {share}")
+        else:  # sort_spill
+            line = (f"Consequence #{r['id']} {r['op']}: sorted on disk ({c['sort_method']}, {c['disk_kb']} kB in the "
+                    f"largest process); the sort itself takes {share}; ")
+            if c["input_direction"] == "under" and c["input_q_error"] >= BAD_Q:
+                line += (f"its input #{c['input_id']} was estimated at {c['input_plan_rows']} rows but produced "
+                         f"{c['input_actual_rows']} per loop ({c['input_q_error']:.0f}x more), so memory was planned "
+                         f"for far less data")
+            else:
+                line += "its input was not badly underestimated, so work_mem is likely too small for this sort"
+            lines.append(line)
     # An empty list joins to "", which is falsy, so "found nothing" also becomes "None"
     return "\n".join(lines) or "None"
 

@@ -86,6 +86,37 @@ check("alias not repeated when it equals the table name", lines[3].startswith(" 
 check("never-executed node says never executed", lines[4].endswith("never executed"))
 check("empty string when there are no nodes", format_plan_for_llm([]) == "")
 
+print("=== 4. sort info ===")
+sort_plan = [{"Execution Time": 1.0, "Plan": {
+    "Node Type": "Sort", "Plan Rows": 10, "Plan Width": 8, "Actual Rows": 10, "Actual Loops": 3,
+    # The leader sorted in memory; both workers spilled (the top-level fields are the leader's only)
+    "Sort Method": "quicksort", "Sort Space Type": "Memory", "Sort Space Used": 25,
+    "Workers": [{"Worker Number": 0, "Sort Method": "external merge", "Sort Space Type": "Disk", "Sort Space Used": 2560},
+                {"Worker Number": 1, "Sort Method": "external merge", "Sort Space Type": "Disk", "Sort Space Used": 2712}],
+    "Plans": [{"Node Type": "Seq Scan", "Plan Rows": 10, "Actual Rows": 10, "Actual Loops": 3}],
+}}]
+s = flatten_plan(sort_plan)
+check("leader in memory, workers on disk → spilled", s[0]["sort_spilled"] is True)
+check("disk kB is the largest single process; method is the disk one",
+      s[0]["sort_disk_kb"] == 2712 and s[0]["sort_method"] == "external merge")
+check("plan width recorded", s[0]["plan_width"] == 8)
+check("non-sort node → no sort info", (s[1]["sort_method"], s[1]["sort_spilled"], s[1]["sort_disk_kb"]) == ("", False, 0))
+inc = flatten_plan([{"Execution Time": 1.0, "Plan": {
+    "Node Type": "Incremental Sort", "Plan Rows": 1, "Actual Rows": 1, "Actual Loops": 1,
+    "Full-sort Groups": {"Group Count": 6, "Sort Methods Used": ["quicksort"],
+                         "Sort Space Memory": {"Average Sort Space Used": 27, "Peak Sort Space Used": 27}},
+    "Pre-sorted Groups": {"Group Count": 6, "Sort Methods Used": ["external merge"],
+                          "Sort Space Disk": {"Average Sort Space Used": 25145, "Peak Sort Space Used": 45352}},
+}}])
+check("Incremental Sort: a group on disk → spilled, peak kB, disk method",
+      inc[0]["sort_spilled"] and inc[0]["sort_disk_kb"] == 45352 and inc[0]["sort_method"] == "external merge")
+mem = flatten_plan([{"Execution Time": 1.0, "Plan": {"Node Type": "Sort", "Plan Rows": 1, "Actual Rows": 1, "Actual Loops": 1,
+                                                     "Sort Method": "quicksort", "Sort Space Type": "Memory", "Sort Space Used": 25}}])
+check("in-memory sort → not spilled, method kept", mem[0]["sort_spilled"] is False and mem[0]["sort_method"] == "quicksort")
+check("format_plan_for_llm mentions the disk sort",
+      "sorted on disk (external merge, 2712 kB)" in format_plan_for_llm(s).splitlines()[0])
+check("…and says nothing for an in-memory sort", "on disk" not in format_plan_for_llm(mem))
+
 print()
 print("ALL PASS" if fails == 0 else f"{fails} FAILED")
 sys.exit(1 if fails else 0)

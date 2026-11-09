@@ -10,7 +10,8 @@ BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BACKEND)
 from sql_surgeon.plan.table import flatten_plan  # noqa: E402
 from sql_surgeon.plan.estimates import (  # noqa: E402
-    analyze_estimates, build_parent_to_children_map, find_consequences, find_origins, find_partial_reads)
+    analyze_estimates, build_parent_to_children_map, find_consequences, find_origins, find_partial_reads,
+    format_estimates_for_llm)
 
 fails = 0
 
@@ -128,6 +129,34 @@ check("parallel: inner side really takes 5% (old formula said 15%) → not repor
 c = find_consequences(rows_of(parallel_nested_loop(0.0003)), 100.0)
 check("parallel: inner side really takes 30% (old formula said 90%) → reported with share 0.3",
       len(c) == 1 and c[0]["type"] == "nested_loop_rescan" and round(c[0]["time_share"], 2) == 0.3)
+
+def sort_under_merge_join(sort_time, input_time, spilled=True):
+    """33b's shape: a Merge Join reads only 7,101 rows of a Sort whose input had 153,308 (30x the estimate)"""
+    sort_fields = ({"Sort Method": "external merge", "Sort Space Type": "Disk", "Sort Space Used": 2992} if spilled
+                   else {"Sort Method": "quicksort", "Sort Space Type": "Memory", "Sort Space Used": 900})
+    return node("Merge Join", 346, 6963, time=99, plans=[
+        node("Sort", 5089, 7101, time=sort_time, plans=[node("Hash Join", 5089, 153308, time=input_time)], **sort_fields),
+        node("Seq Scan", 29997, 29997, time=1),
+    ])
+
+c = find_consequences(rows_of(sort_under_merge_join(30, 5)), 100.0)
+check("Sort spilled, its own time 30 - 5 = 25% → sort_spill",
+      len(c) == 1 and c[0]["type"] == "sort_spill" and c[0]["id"] == 1 and round(c[0]["time_share"], 2) == 0.25
+      and c[0]["disk_kb"] == 2992 and c[0]["sort_method"] == "external merge")
+check("…sized by its input (#2: 5,089 est / 153,308 actual), not its cut-short output (7,101)",
+      c[0]["input_id"] == 2 and c[0]["input_plan_rows"] == 5089 and c[0]["input_actual_rows"] == 153308
+      and c[0]["input_direction"] == "under" and round(c[0]["input_q_error"]) == 30)
+check("30% including its input but only 5% its own → not reported",
+      find_consequences(rows_of(sort_under_merge_join(30, 25)), 100.0) == [])
+check("sorted in memory → not reported", find_consequences(rows_of(sort_under_merge_join(30, 5, spilled=False)), 100.0) == [])
+text = format_estimates_for_llm({"origins": [], "consequences": c}, rows_of(sort_under_merge_join(30, 5)))
+check("LLM text: disk sort, its share, and the 30x underestimated input",
+      "sorted on disk (external merge, 2992 kB" in text and "25%" in text and "153308" in text and "30x more" in text)
+c = find_consequences(rows_of(node("Sort", 1000, 1000, time=30, plans=[node("Seq Scan", 1000, 1000, time=5)],
+                                   **{"Sort Method": "external merge", "Sort Space Type": "Disk", "Sort Space Used": 900})), 100.0)
+check("input estimated right → still reported, LLM text blames work_mem",
+      len(c) == 1 and "work_mem is likely too small" in format_estimates_for_llm(
+          {"origins": [], "consequences": c}, rows_of(node("Sort", 1000, 1000, plans=[node("Seq Scan", 1000, 1000)]))))
 
 print("=== 4. analyze_estimates ===")
 r = analyze_estimates(plan_11d)

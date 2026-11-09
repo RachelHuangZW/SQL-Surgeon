@@ -96,6 +96,9 @@ Children of a `Merge Join` or `Limit` may be stopped early, so their actual row 
 |------|---------------|
 | `hash_spill` | A Hash needed more batches than planned (it spilled to disk) |
 | `nested_loop_rescan` | A Nested Loop's inner side ran ≥ 10× more times than planned. Under a `Memoize`, only cache misses count: those are the node below it actually running. |
+| `sort_spill` | A `Sort` / `Incremental Sort` wrote to disk in the leader or any parallel worker, and the sort's own time (excluding its input) is ≥ 10%. Reported whatever the cause: if its input wasn't underestimated by ≥ 10×, the text points at `work_mem` instead. |
+
+A disk sort below the 10% threshold isn't a consequence, but the plan table still marks it. A `Sort`'s size is judged by its input, because a `Merge Join` or `Limit` above it can cut its own row count short.
 
 Time shares account for parallel plans: below a `Gather`, the leader and the launched workers run the subtree at the same time, so `time × loops` is divided by that number of processes.
 

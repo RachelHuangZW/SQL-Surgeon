@@ -60,13 +60,18 @@ const ORIGIN_MARK: NodeMark = { label: 'misestimate origin', className: 'text-re
 const CONSEQUENCE_MARK: Record<EstimateConsequence['type'], NodeMark> = {
   hash_spill: { label: 'hash spilled', className: 'text-orange-700 bg-orange-50 border-orange-200' },
   nested_loop_rescan: { label: 'rescanned', className: 'text-orange-700 bg-orange-50 border-orange-200' },
+  sort_spill: { label: 'sorted on disk', className: 'text-orange-700 bg-orange-50 border-orange-200' },
 }
 
-function estimateMarks(analysis: EstimateAnalysis | null): Map<number, NodeMark[]> {
+function estimateMarks(analysis: EstimateAnalysis | null, rows: PlanRow[]): Map<number, NodeMark[]> {
   const marks = new Map<number, NodeMark[]>()
   const add = (id: number, mark: NodeMark) => marks.set(id, [...(marks.get(id) ?? []), mark])
   analysis?.origins.forEach((o) => add(o.id, ORIGIN_MARK))
   analysis?.consequences.forEach((c) => add(c.id, CONSEQUENCE_MARK[c.type]))
+  // Every disk sort is shown, even below the time threshold that makes it a reported consequence
+  const reported = new Set(analysis?.consequences.filter((c) => c.type === 'sort_spill').map((c) => c.id))
+  rows.filter((r) => r.sort_spilled && !reported.has(r.id)).forEach((r) =>
+    add(r.id, { label: `disk sort ${r.sort_disk_kb.toLocaleString()} kB`, className: 'text-slate-600 bg-slate-50 border-slate-200' }))
   return marks
 }
 
@@ -167,20 +172,36 @@ function consequenceText(c: EstimateConsequence): string {
   if (c.type === 'hash_spill') {
     return `Hash table was planned for ${c.planned_batches} batch${c.planned_batches === 1 ? '' : 'es'} but needed ${c.actual_batches}, so it spilled to disk. Its join takes ~${share}.`
   }
+  if (c.type === 'sort_spill') {
+    const input = c.input_direction === 'under' && (c.input_q_error ?? 0) >= 10
+      ? ` Its input was estimated at ${c.input_plan_rows?.toLocaleString()} rows but had ${c.input_actual_rows?.toLocaleString()}, so memory was planned for far less data.`
+      : ' Its input was not badly underestimated, so work_mem is likely too small for this sort.'
+    return `Sort spilled to disk (${c.sort_method}, ${c.disk_kb?.toLocaleString()} kB). The sort itself takes ~${share}.${input}`
+  }
   return `Inner side of a Nested Loop ran ${c.actual_loops?.toLocaleString()} times, planned ${c.planned_loops?.toLocaleString()}. Takes ~${share}.`
 }
 
-function EstimateErrors({ analysis, rows, selectedKey, onSelect }: {
-  analysis: EstimateAnalysis
+type EstimateItem = { key: string; id: number; mark: NodeMark; text: string }
+
+// Origins and consequences go in separate sections: a consequence isn't always an estimate error
+// (a Sort can spill with exact estimates when work_mem is just too small)
+function estimateItems(analysis: EstimateAnalysis | null, rows: PlanRow[]) {
+  const byId = new Map(rows.map((r) => [r.id, r]))
+  return {
+    origins: (analysis?.origins ?? []).map((o, i): EstimateItem =>
+      ({ key: `origin-${i}`, id: o.id, mark: ORIGIN_MARK, text: originText(o, byId.get(o.id)) })),
+    consequences: (analysis?.consequences ?? []).map((c, i): EstimateItem =>
+      ({ key: `consequence-${i}`, id: c.id, mark: CONSEQUENCE_MARK[c.type], text: consequenceText(c) })),
+  }
+}
+
+function EstimateList({ items, rows, selectedKey, onSelect }: {
+  items: EstimateItem[]
   rows: PlanRow[]
   selectedKey: string | null
   onSelect: (key: string, ids: number[]) => void
 }) {
   const byId = new Map(rows.map((r) => [r.id, r]))
-  const items = [
-    ...analysis.origins.map((o, i) => ({ key: `origin-${i}`, id: o.id, mark: ORIGIN_MARK, text: originText(o, byId.get(o.id)) })),
-    ...analysis.consequences.map((c, i) => ({ key: `consequence-${i}`, id: c.id, mark: CONSEQUENCE_MARK[c.type], text: consequenceText(c) })),
-  ]
 
   return (
     <ul className="flex flex-col gap-2">
@@ -228,9 +249,8 @@ function ResultTabs({ result }: { result: AnalysisResult }) {
 
   const nodeIdsOf = (i: number) => result.issue_node_ids?.[i] ?? []
   const highlight = new Set(selected?.ids ?? [])
-  const marks = estimateMarks(result.estimate_analysis)
-  const estimates = result.estimate_analysis
-  const estimateCount = (estimates?.origins.length ?? 0) + (estimates?.consequences.length ?? 0)
+  const marks = estimateMarks(result.estimate_analysis, result.plan_table ?? [])
+  const estimates = estimateItems(result.estimate_analysis, result.plan_table ?? [])
 
   function select(key: string, ids: number[]) {
     if (ids.length === 0) return
@@ -335,11 +355,21 @@ function ResultTabs({ result }: { result: AnalysisResult }) {
             </Section>
           )}
 
-          {/* Computed from the plan, not by the LLM: where row estimates first go wrong, and what that slowed down */}
-          {estimates && estimateCount > 0 && (
-            <Section title={<>≠ Row Estimate Errors <span className="text-slate-500 font-normal normal-case">({estimateCount})</span></>} color="text-red-600">
-              <EstimateErrors
-                analysis={estimates}
+          {/* Computed from the plan, not by the LLM: where row estimates first go wrong, and what ran slow */}
+          {estimates.origins.length > 0 && (
+            <Section title={<>≠ Row Estimate Errors <span className="text-slate-500 font-normal normal-case">({estimates.origins.length})</span></>} color="text-red-600">
+              <EstimateList
+                items={estimates.origins}
+                rows={result.plan_table ?? []}
+                selectedKey={selected?.key ?? null}
+                onSelect={select}
+              />
+            </Section>
+          )}
+          {estimates.consequences.length > 0 && (
+            <Section title={<>⏱ Slow Operations <span className="text-slate-500 font-normal normal-case">({estimates.consequences.length})</span></>} color="text-orange-600">
+              <EstimateList
+                items={estimates.consequences}
                 rows={result.plan_table ?? []}
                 selectedKey={selected?.key ?? null}
                 onSelect={select}

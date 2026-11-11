@@ -197,6 +197,23 @@ def benchmark_setup_statements(ddl: str) -> list:
     return allowed
 
 
+def plan_relations(plan) -> set:
+    """{(schema, table)} of every table a plan reads, from EXPLAIN (VERBOSE, FORMAT JSON)."""
+    if not plan:
+        return set()
+    relations = set()
+    
+    def visit(node):
+        if "Relation Name" in node:
+            relations.add((node["Schema"], node["Relation Name"]))
+        for child in node.get("Plans", []):
+            visit(child)
+    
+    root = plan[0]["Plan"]
+    visit(root)
+    return relations
+    
+
 class DBClient:
     def __init__(self, dsn):
         self.dsn = dsn
@@ -432,7 +449,7 @@ class DBClient:
         ensure_query_statement(statement)
         return self._run_user_sql(statement, lambda cursor: [dict(row) for row in cursor.fetchall()])
 
-    def benchmark_in_sandbox(self, table_names: list, original_sql: str, suggested_ddl: str):
+    def benchmark_in_sandbox(self, original_sql: str, suggested_ddl: str):
         """EXPLAIN ANALYZE original_sql against copies of its tables with the suggested indexes applied.
 
         Logs in as SURGEON_SANDBOX_DATABASE_URL (sql_surgeon_sandbox: CREATE on the database, SELECT on
@@ -453,7 +470,8 @@ class DBClient:
         statement = ensure_single_statement(original_sql)
         ensure_query_statement(statement)
         setup = benchmark_setup_statements(suggested_ddl or "")
-        schema = pgsql.Identifier(f"surgeon_tmp_{uuid.uuid4().hex[:12]}")
+        schema_name = f"surgeon_tmp_{uuid.uuid4().hex[:12]}"
+        schema = pgsql.Identifier(schema_name)
 
         conn = psycopg2.connect(self.sandbox_dsn, application_name="sql_surgeon_benchmark")
         try:
@@ -476,10 +494,18 @@ class DBClient:
                 
                 cursor.execute("SET LOCAL statement_timeout = '300s'")  # DDL + EXPLAIN ANALYZE
                 cursor.execute("SET LOCAL lock_timeout = %s", (self.config.lock_timeout_ms,))
+                cursor.execute("SET LOCAL search_path TO public")
+                cursor.execute(f"EXPLAIN (VERBOSE, FORMAT JSON) {statement}")
+                relations = plan_relations(cursor.fetchone()["QUERY PLAN"])
+                outside = sorted(f"{s}.{t}" for s, t in relations if s != "public")
+                if outside:
+                    raise UnsafeSQLError(f"The sandbox only copies tables from public; the query reads {', '.join(outside)}")
+                tables = sorted(t for _, t in relations)
+                
                 cursor.execute(pgsql.SQL("CREATE SCHEMA {}").format(schema))
-                for table in table_names:
-                    # Lowercased like an unquoted identifier would be
-                    t = pgsql.Identifier(table.lower())
+                for table in tables:
+                    # The real table name from the plan, so no case folding
+                    t = pgsql.Identifier(table)
                     cursor.execute(pgsql.SQL(
                         "CREATE TABLE {}.{} (LIKE public.{} INCLUDING DEFAULTS INCLUDING INDEXES)"
                     ).format(schema, t, t))
@@ -488,12 +514,24 @@ class DBClient:
                     # Done here for every copy; the advice script only analyzes tables with expression indexes.
                     cursor.execute(pgsql.SQL("ANALYZE {}.{}").format(schema, t))
 
-                cursor.execute(pgsql.SQL("SET LOCAL search_path TO {}").format(schema))
+                # The copies come first; public is there for what extensions installed in it provide,
+                # such as pg_trgm's gin_trgm_ops operator class (GH#2)
+                cursor.execute(pgsql.SQL("SET LOCAL search_path TO {}, public").format(schema))
+                
+                skipped = []
                 for ddl in setup:
-                    cursor.execute(ddl)
+                    table = index_table(ddl)
+                    if table is not None and table not in tables:
+                        skipped.append(ddl)
+                    elif _ANALYZE.fullmatch(ddl):
+                        for t in analyze_tables(ddl):
+                            if t in tables:
+                                cursor.execute(pgsql.SQL("ANALYZE {}.{}").format(schema, pgsql.Identifier(t)))
+                    else:
+                        cursor.execute(ddl)
 
                 cursor.execute(f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {statement}")
-                return cursor.fetchone()["QUERY PLAN"]
+                return cursor.fetchone()["QUERY PLAN"], skipped
 
         except Exception as e:
             logger.error(f"Error running sandbox benchmark: {e}")

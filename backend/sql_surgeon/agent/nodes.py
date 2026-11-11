@@ -841,21 +841,10 @@ def generate_benchmark_schema(state: AgentState):
     if not state.get("optimized_sql"):
         return {"error": "No optimized SQL to benchmark"}
 
-    table_names = list(
-        set(
-            re.findall(
-                r"(?:FROM|JOIN|,)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
-                original_sql,
-                re.IGNORECASE,
-            )
-        )
-    )
     suggested_ddl = state.get("optimized_sql")
-
+    
     try:
-        new_plan = db_client.benchmark_in_sandbox(
-            table_names, original_sql, suggested_ddl
-        )
+        new_plan = db_client.benchmark_in_sandbox(original_sql, suggested_ddl)
         return {"benchmark_result": new_plan}
     except Exception as e:
         return {"error": f"Database Execution Failure: {str(e)}"}

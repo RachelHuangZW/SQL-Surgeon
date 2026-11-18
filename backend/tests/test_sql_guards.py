@@ -7,16 +7,18 @@ import sys
 
 BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BACKEND)
-from sql_surgeon.db.client import (  # noqa: E402
+from sql_surgeon.db.client import (
     UnsafeSQLError,
+    analyze_tables,
     benchmark_setup_statements,
     ensure_query_statement,
     ensure_single_statement,
+    index_table,
+    plan_relations,
     split_statements,
 )
 
 fails = 0
-
 
 def check(name, cond):
     global fails
@@ -89,6 +91,34 @@ for bad in [
         check(f"rejects {bad!r}", rejected(benchmark_setup_statements, bad))
 check("a write mixed in with valid statements rejects the whole script",
       rejected(benchmark_setup_statements, "CREATE INDEX i ON orders (a);\nDELETE FROM public.orders WHERE id > 90;"))
+
+print("\n=== 4. plan_relations ===")
+join_plan = [{"Plan": {"Node Type": "Hash Join", "Plans": [
+    {"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "title", "Alias": "t1"},
+    {"Node Type": "Hash", "Plans": [
+        {"Node Type": "Nested Loop", "Plans": [
+            {"Node Type": "Seq Scan", "Schema": "public", "Relation Name": "kind_type", "Alias": "k"},
+            # Same table again under another alias (33b reads title as t1 and t2)
+            {"Node Type": "Index Scan", "Schema": "public", "Relation Name": "title", "Alias": "t2"},
+        ]},
+    ]},
+]}}]
+check("every table at any depth, each once", plan_relations(join_plan) == {("public", "title"), ("public", "kind_type")})
+check("join / hash nodes add nothing", plan_relations([{"Plan": {"Node Type": "Result"}}]) == set())
+check("schema comes from the plan", plan_relations([{"Plan": {"Node Type": "Seq Scan", "Schema": "surgeon_tmp_ab12",
+                                                              "Relation Name": "title"}}]) == {("surgeon_tmp_ab12", "title")})
+check("empty set when there is no plan", plan_relations([]) == set())
+
+print("\n=== 5. index_table / analyze_tables ===")
+check("CREATE INDEX → its table", index_table("CREATE INDEX ON title (production_year)") == "title")
+check("unquoted folds to lowercase", index_table("CREATE INDEX IF NOT EXISTS i ON ONLY Title (a)") == "title")
+check("quoted keeps its case", index_table('CREATE INDEX i ON "Title" USING gin (x gin_trgm_ops)') == "Title")
+check("not a CREATE INDEX → None", index_table("ANALYZE title") is None)
+check("ANALYZE → every table, column lists ignored",
+      analyze_tables("ANALYZE title, movie_info (info, note), Kind_Type") == ["title", "movie_info", "kind_type"])
+check("ANALYZE VERBOSE", analyze_tables("ANALYZE VERBOSE title") == ["title"])
+check("not an ANALYZE → []", analyze_tables("CREATE INDEX ON title (a)") == [])
+
 
 print(f"\n{fails} failed")
 sys.exit(1 if fails else 0)

@@ -5,6 +5,7 @@ with -v sb_password=...) and SURGEON_SANDBOX_DATABASE_URL; without it, it is ski
 
 Run from backend/:  ../.venv/bin/python tests/test_sandbox_benchmark.py
 """
+import json
 import logging
 import os
 import sys
@@ -62,13 +63,13 @@ def admin_one(sql):
 
 
 print("=== 1. Not configured → refused, never falls back to DATABASE_URL ===")
-e = raises(lambda: client_with_sandbox(None).benchmark_in_sandbox(["title"], QUERY, ""), SandboxNotConfiguredError)
+e = raises(lambda: client_with_sandbox(None).benchmark_in_sandbox( QUERY, ""), SandboxNotConfiguredError)
 check("SandboxNotConfiguredError", e is not None)
 check("the message says how to fix it", e is not None and "SURGEON_SANDBOX_DATABASE_URL" in str(e)
       and "setup_security_role.sql" in str(e))
 
 print("\n=== 2. Configured with a superuser login → refused before running anything ===")
-e = raises(lambda: client_with_sandbox(ADMIN).benchmark_in_sandbox(["title"], QUERY, ""), UnsafeSQLError)
+e = raises(lambda: client_with_sandbox(ADMIN).benchmark_in_sandbox( QUERY, ""), UnsafeSQLError)
 check(f"UnsafeSQLError: {str(e)[:80] if e else None}", e is not None and "superuser" in str(e))
 
 print("\n=== 3. The sql_surgeon_sandbox login ===")
@@ -76,17 +77,15 @@ if not SANDBOX:
     print("  SKIP SURGEON_SANDBOX_DATABASE_URL is not set (run the setup script with -v sb_password=...)")
 else:
     db = client_with_sandbox(SANDBOX)
-    plan = db.benchmark_in_sandbox(["title"], QUERY, "CREATE INDEX ON title(production_year);")
+    plan, _ = db.benchmark_in_sandbox( QUERY, "CREATE INDEX ON title(production_year);")
     check("a normal benchmark (index + EXPLAIN ANALYZE) still works", isinstance(plan, list) and "Plan" in plan[0])
 
-    e = raises(lambda: db.benchmark_in_sandbox(
-        ["title"], "WITH d AS (DELETE FROM public.kind_type RETURNING *) SELECT count(*) FROM d", ""),
+    e = raises(lambda: db.benchmark_in_sandbox("WITH d AS (DELETE FROM public.kind_type RETURNING *) SELECT count(*) FROM d", ""),
         psycopg2.errors.InsufficientPrivilege)
     check("data-modifying CTE on a real table → permission denied", e is not None)
 
     victim = psycopg2.connect(ADMIN, application_name="sandbox_test_victim")
-    e = raises(lambda: db.benchmark_in_sandbox(
-        ["title"], "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'sandbox_test_victim'",
+    e = raises(lambda: db.benchmark_in_sandbox("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'sandbox_test_victim'",
         ""), psycopg2.errors.InsufficientPrivilege)
     try:
         victim.cursor().execute("SELECT 1")
@@ -96,9 +95,26 @@ else:
     victim.close()
     check("terminating another role's session → permission denied, the session survives", e is not None and alive)
 
-    e = raises(lambda: db.benchmark_in_sandbox(
-        ["title"], "SELECT set_config('role', 'postgres', true)", ""), psycopg2.errors.InsufficientPrivilege)
+    e = raises(lambda: db.benchmark_in_sandbox("SELECT set_config('role', 'postgres', true)", ""), psycopg2.errors.InsufficientPrivilege)
     check("switching to a privileged role from inside the query → permission denied", e is not None)
+    plan, _ = db.benchmark_in_sandbox("SELECT * FROM title WHERE title LIKE '%Money%'",
+                                   "CREATE EXTENSION IF NOT EXISTS pg_trgm; "
+                                   "CREATE INDEX ON title USING gin (title gin_trgm_ops);")
+    check("GH#2: a pg_trgm GIN index builds and the plan uses it", '"Bitmap Index Scan"' in json.dumps(plan))
+
+    plan, _ = db.benchmark_in_sandbox("SELECT count(*) FROM title t JOIN kind_type k ON k.id = t.kind_id", "")
+    check("every table the query reads is copied (from the plan, not a regex)", isinstance(plan, list) and "Plan" in plan[0])
+
+    plan, _ = db.benchmark_in_sandbox("WITH x AS (SELECT * FROM kind_type) SELECT * FROM x", "")
+    check("a CTE name isn't mistaken for a table", isinstance(plan, list) and "Plan" in plan[0])
+
+    plan, skipped = db.benchmark_in_sandbox(QUERY, "CREATE INDEX ON company_name (name); "
+                                                   "CREATE INDEX ON title (production_year);")
+    check("an index on a table the query doesn't read is skipped, not run", skipped == ["CREATE INDEX ON company_name (name)"])
+    check("the other index is still built and used", '"Index Name"' in json.dumps(plan))
+
+    plan, skipped = db.benchmark_in_sandbox(QUERY, "ANALYZE title, company_name (name);")
+    check("ANALYZE runs on the copies only and isn't reported as skipped", isinstance(plan, list) and skipped == [])
 
     check("kind_type untouched", admin_one("SELECT count(*) FROM kind_type") == 7)
     check("no sandbox schema left behind",

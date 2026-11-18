@@ -157,7 +157,7 @@ _IDENT = r'(?:[A-Za-z_][A-Za-z0-9_$]*|"[^".]+")'
 _LEADING_COMMENTS = re.compile(r"(?:\s+|--[^\n]*(?:\n|$)|/\*.*?\*/)*", re.DOTALL)
 _CREATE_INDEX = re.compile(
     rf"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?P<concurrently>CONCURRENTLY\s+)?"
-    rf"(?:(?:IF\s+NOT\s+EXISTS\s+)?{_IDENT}\s+)?ON\s+(?:ONLY\s+)?{_IDENT}\s*(?:USING\s+\w+\s*)?\(",
+    rf"(?:(?:IF\s+NOT\s+EXISTS\s+)?{_IDENT}\s+)?ON\s+(?:ONLY\s+)?(?P<table>{_IDENT})\s*(?:USING\s+\w+\s*)?\(",
     re.IGNORECASE,
 )
 # For validating recommendations: any CREATE INDEX (schema-qualified names are fine); hypopg checks the rest.
@@ -169,6 +169,7 @@ _CREATE_EXTENSION = re.compile(
 )
 _COLUMNS = r"(?:\s*\(\s*[^()]*\))?"
 _ANALYZE = re.compile(rf"ANALYZE\s+(?:VERBOSE\s+)?{_IDENT}{_COLUMNS}(?:\s*,\s*{_IDENT}{_COLUMNS})*\s*", re.IGNORECASE)
+_ANALYZE_TABLE = re.compile(rf"(?:ANALYZE\s+(?:VERBOSE\s+)?|,\s*)({_IDENT})", re.IGNORECASE)
 
 
 def benchmark_setup_statements(ddl: str) -> list:
@@ -195,6 +196,24 @@ def benchmark_setup_statements(ddl: str) -> list:
             except UnsafeSQLError:
                 raise UnsafeSQLError(f"Statement not allowed in benchmark sandbox: {body[:200]!r}") from None
     return allowed
+
+def _ident_name(ident: str) -> str:
+    """The name PostgreSQL stores for an identifier: "Quoted" keeps its case, unquoted folds to lowercase."""
+    return ident[1:-1] if ident.startswith('"') else ident.lower()
+
+
+def index_table(statement: str):
+    """The table an allowed CREATE INDEX is built on, or None if the statement isn't one."""
+    m = _CREATE_INDEX.match(statement)
+    return _ident_name(m.group("table")) if m else None
+
+
+def analyze_tables(statement: str) -> list:
+    """The tables an allowed ANALYZE names, or [] if the statement isn't one."""
+    if not _ANALYZE.fullmatch(statement):
+        return []
+    without_columns = re.sub(r"\([^()]*\)", "", statement)
+    return [_ident_name(t) for t in _ANALYZE_TABLE.findall(without_columns)]
 
 
 def plan_relations(plan) -> set:

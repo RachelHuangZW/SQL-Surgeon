@@ -844,7 +844,11 @@ def generate_benchmark_schema(state: AgentState):
     suggested_ddl = state.get("optimized_sql")
     
     try:
-        new_plan = db_client.benchmark_in_sandbox(original_sql, suggested_ddl)
-        return {"benchmark_result": new_plan}
+        new_plan, skipped = db_client.benchmark_in_sandbox(original_sql, suggested_ddl)
+        warnings = list(state.get("rewrite_warnings") or [])
+        for ddl in skipped:
+            warnings.append(f"Not benchmarked: {ddl}; the query doesn't read this table, so the index can't change its plan")
+        return {"benchmark_result": new_plan, "rewrite_warnings": warnings}
+
     except Exception as e:
         return {"error": f"Database Execution Failure: {str(e)}"}

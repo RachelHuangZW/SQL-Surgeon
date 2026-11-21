@@ -10,12 +10,12 @@ export default function Home() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  async function handleAnalyze(sql: string, ddl: string) {
+  async function handleAnalyze(sql: string, ddl: string, runBenchmark: boolean) {
     setLoading(true)
     setError(null)
     setResult(null)
     try {
-      const res = await analyze(sql, ddl)
+      const res = await analyze(sql, ddl, runBenchmark)
       setResult(res)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unknown error')

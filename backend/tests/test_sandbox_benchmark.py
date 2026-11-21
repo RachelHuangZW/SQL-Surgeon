@@ -77,7 +77,7 @@ if not SANDBOX:
     print("  SKIP SURGEON_SANDBOX_DATABASE_URL is not set (run the setup script with -v sb_password=...)")
 else:
     db = client_with_sandbox(SANDBOX)
-    plan, _ = db.benchmark_in_sandbox( QUERY, "CREATE INDEX ON title(production_year);")
+    plan = db.benchmark_in_sandbox( QUERY, "CREATE INDEX ON title(production_year);")["after"]
     check("a normal benchmark (index + EXPLAIN ANALYZE) still works", isinstance(plan, list) and "Plan" in plan[0])
 
     e = raises(lambda: db.benchmark_in_sandbox("WITH d AS (DELETE FROM public.kind_type RETURNING *) SELECT count(*) FROM d", ""),
@@ -97,24 +97,29 @@ else:
 
     e = raises(lambda: db.benchmark_in_sandbox("SELECT set_config('role', 'postgres', true)", ""), psycopg2.errors.InsufficientPrivilege)
     check("switching to a privileged role from inside the query → permission denied", e is not None)
-    plan, _ = db.benchmark_in_sandbox("SELECT * FROM title WHERE title LIKE '%Money%'",
+    plan = db.benchmark_in_sandbox("SELECT * FROM title WHERE title LIKE '%Money%'",
                                    "CREATE EXTENSION IF NOT EXISTS pg_trgm; "
-                                   "CREATE INDEX ON title USING gin (title gin_trgm_ops);")
+                                   "CREATE INDEX ON title USING gin (title gin_trgm_ops);")["after"]
     check("GH#2: a pg_trgm GIN index builds and the plan uses it", '"Bitmap Index Scan"' in json.dumps(plan))
 
-    plan, _ = db.benchmark_in_sandbox("SELECT count(*) FROM title t JOIN kind_type k ON k.id = t.kind_id", "")
+    plan = db.benchmark_in_sandbox("SELECT count(*) FROM title t JOIN kind_type k ON k.id = t.kind_id", "")["after"]
     check("every table the query reads is copied (from the plan, not a regex)", isinstance(plan, list) and "Plan" in plan[0])
 
-    plan, _ = db.benchmark_in_sandbox("WITH x AS (SELECT * FROM kind_type) SELECT * FROM x", "")
+    plan = db.benchmark_in_sandbox("WITH x AS (SELECT * FROM kind_type) SELECT * FROM x", "")["after"]
     check("a CTE name isn't mistaken for a table", isinstance(plan, list) and "Plan" in plan[0])
 
-    plan, skipped = db.benchmark_in_sandbox(QUERY, "CREATE INDEX ON company_name (name); "
-                                                   "CREATE INDEX ON title (production_year);")
-    check("an index on a table the query doesn't read is skipped, not run", skipped == ["CREATE INDEX ON company_name (name)"])
-    check("the other index is still built and used", '"Index Name"' in json.dumps(plan))
+    b = db.benchmark_in_sandbox(QUERY, "CREATE INDEX ON company_name (name); "
+                                       "CREATE INDEX ON title (production_year);")
+    check("an index on a table the query doesn't read is skipped, not run", b["skipped"] == ["CREATE INDEX ON company_name (name)"])
+    check("the other index is still built and used", '"Index Name"' in json.dumps(b["after"]))
+    check("#16: the baseline runs on the same copies without the suggested index",
+          "Plan" in b["before"][0] and '"Index Name"' not in json.dumps(b["before"]))
+    check("#16: the name PostgreSQL gave the index is reported, and the plan uses it",
+          [i["ddl"] for i in b["indexes"]] == ["CREATE INDEX ON title (production_year)"]
+          and f'"Index Name": "{b["indexes"][0]["name"]}"' in json.dumps(b["after"]))
 
-    plan, skipped = db.benchmark_in_sandbox(QUERY, "ANALYZE title, company_name (name);")
-    check("ANALYZE runs on the copies only and isn't reported as skipped", isinstance(plan, list) and skipped == [])
+    b = db.benchmark_in_sandbox(QUERY, "ANALYZE title, company_name (name);")
+    check("ANALYZE runs on the copies only and isn't reported as skipped", "Plan" in b["after"][0] and b["skipped"] == [])
 
     admin_one("CREATE VIEW sandbox_test_view AS SELECT * FROM kind_type; "
               "GRANT SELECT ON sandbox_test_view TO sql_surgeon_sandbox; SELECT 1")

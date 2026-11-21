@@ -133,6 +133,11 @@ check("both the reviewer's and the schema feedback reach generate_advice",
 s = review_with("pass", "", 1)
 check("no retry left → stays pass and ends", s["verdict"] == "pass" and route_after_review(s) == "end")
 
+s = review_with("retry", "Still wrong.", 1)
+check("out of retries → the last advice is still benchmarked when asked for (#16)",
+      s["retry_count"] == 2 and route_after_review({**s, "run_benchmark": True}) == "benchmark")
+check("out of retries, no benchmark asked for → ends", route_after_review(s) == "end")
+
 ok = [i for i in indexes if "tconst" not in i["ddl"]]
 ok_script = "\n".join(line for line in script.splitlines() if "tconst" not in line)
 s = review_with("pass", "", 0, idx=ok, sql=ok_script)

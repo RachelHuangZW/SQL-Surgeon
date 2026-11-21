@@ -3,18 +3,19 @@
 import { useState } from 'react'
 
 interface Props {
-  onAnalyze: (sql: string, ddl: string) => void
+  onAnalyze: (sql: string, ddl: string, runBenchmark: boolean) => void
   loading: boolean
 }
 
 export default function InputPanel({ onAnalyze, loading }: Props) {
   const [sql, setSql] = useState('')
   const [ddl, setDdl] = useState('')
+  const [benchmark, setBenchmark] = useState(false)
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!sql.trim()) return
-    onAnalyze(sql, ddl)
+    onAnalyze(sql, ddl, benchmark)
   }
 
   return (
@@ -48,7 +49,21 @@ export default function InputPanel({ onAnalyze, loading }: Props) {
         />
       </div>
 
-      <div className="mt-auto">
+      <div className="mt-auto flex flex-col gap-3">
+        <label className="flex items-start gap-2 text-sm text-slate-700 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={benchmark}
+            onChange={e => setBenchmark(e.target.checked)}
+            className="mt-0.5 accent-violet-600"
+          />
+          <span>
+            Benchmark the suggested indexes
+            <span className="block text-xs text-slate-400">
+              Runs the query before and after them on copies of ≤100k rows per table. Needs SURGEON_SANDBOX_DATABASE_URL.
+            </span>
+          </span>
+        </label>
         <button
           type="submit"
           disabled={loading || !sql.trim()}

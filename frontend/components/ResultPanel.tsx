@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { AnalysisResult, EstimateAnalysis, EstimateConsequence, EstimateOrigin, PlanRow } from '@/lib/api'
+import { AnalysisResult, BenchmarkSummary, EstimateAnalysis, EstimateConsequence, EstimateOrigin, PlanRow } from '@/lib/api'
 
 interface Props {
   result: AnalysisResult | null
@@ -229,6 +229,81 @@ function EstimateList({ items, rows, selectedKey, onSelect }: {
   )
 }
 
+// Within 10% counts as no change: two runs with no new index at all differ about that much
+function speedup(beforeMs: number, afterMs: number): { text: string; className: string } {
+  const ratio = beforeMs / afterMs
+  if (!isFinite(ratio) || ratio <= 0) return { text: '', className: '' }
+  if (ratio >= 1.1) return { text: `${ratio.toFixed(ratio >= 10 ? 0 : 1)}× faster`, className: 'text-emerald-700' }
+  if (ratio <= 1 / 1.1) return { text: `${(1 / ratio).toFixed(1)}× slower`, className: 'text-red-600' }
+  return { text: 'no measurable change', className: 'text-slate-500' }
+}
+
+function BenchmarkSection({ summary, error }: { summary: BenchmarkSummary | null; error: string | null }) {
+  if (!summary && !error) return null
+  const change = summary ? speedup(summary.before.execution_ms, summary.after.execution_ms) : null
+  return (
+    <Section
+      title={<>⏱ Sandbox Benchmark <span className="text-slate-500 font-normal normal-case">(≤100k rows per table)</span></>}
+      color="text-sky-600"
+    >
+      {error && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+          <p className="text-sm font-medium text-amber-700 mb-1">Not run</p>
+          <p className="text-xs text-amber-800/80 whitespace-pre-wrap">{error}</p>
+        </div>
+      )}
+      {summary && change && (
+        <div className="flex flex-col gap-3 bg-white rounded-lg p-3 border border-slate-200">
+          <table className="text-sm w-fit">
+            <thead>
+              <tr className="text-xs text-slate-500 text-left">
+                <th className="font-normal pr-6" />
+                <th className="font-normal pr-6">Before</th>
+                <th className="font-normal pr-6">After</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody className="font-mono text-slate-900">
+              <tr>
+                <td className="font-sans text-xs text-slate-500 pr-6 py-1">Execution time</td>
+                <td className="pr-6">{summary.before.execution_ms.toFixed(1)} ms</td>
+                <td className="pr-6">{summary.after.execution_ms.toFixed(1)} ms</td>
+                <td className={`font-sans text-sm font-medium ${change.className}`}>{change.text}</td>
+              </tr>
+              <tr className="text-xs">
+                <td className="font-sans text-slate-500 pr-6 py-1">Buffers hit / read</td>
+                <td className="pr-6">{summary.before.shared_hit.toLocaleString()} / {summary.before.shared_read.toLocaleString()}</td>
+                <td className="pr-6">{summary.after.shared_hit.toLocaleString()} / {summary.after.shared_read.toLocaleString()}</td>
+                <td />
+              </tr>
+            </tbody>
+          </table>
+
+          {summary.indexes.length === 0 ? (
+            <p className="text-xs text-slate-500">The script builds no index, so both runs had the same indexes.</p>
+          ) : (
+            <ul className="flex flex-col gap-1">
+              {summary.indexes.map((idx, i) => (
+                <li key={i} className="flex items-start gap-2 text-xs">
+                  <span className={`shrink-0 w-16 ${idx.used ? 'text-emerald-700' : 'text-slate-400'}`}>
+                    {idx.used ? '✓ used' : '✗ not used'}
+                  </span>
+                  <code className="font-mono text-slate-700 break-all">{idx.ddl}</code>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <p className="text-xs text-slate-500 leading-relaxed">
+            Both runs use the same copies, inside a transaction that is rolled back. Times on the full tables differ;
+            what carries over is whether the planner picks an index up.
+          </p>
+        </div>
+      )}
+    </Section>
+  )
+}
+
 function EmptyTab({ children }: { children: React.ReactNode }) {
   return (
     <div className="text-sm text-slate-500 bg-slate-50 border border-dashed border-slate-200 rounded-lg p-6 text-center">
@@ -423,6 +498,8 @@ function ResultTabs({ result }: { result: AnalysisResult }) {
             </Section>
           )}
 
+          <BenchmarkSection summary={result.benchmark_summary} error={result.benchmark_error} />
+
           {result.optimized_sql && (
             <Section title="Optimized SQL" color="text-violet-600">
               <div className="relative">
@@ -493,8 +570,8 @@ export default function ResultPanel({ result, loading, error }: Props) {
             <span className="text-xs text-slate-500 uppercase tracking-wider">Current execution time</span>
             <span className="text-slate-900 font-mono font-medium">{result.execution_time_ms.toFixed(1)} ms</span>
           </div>
-          {/* No "after indexes" figure until there is a measured before/after on the same data:
-              a lower planner cost does not mean a faster query */}
+          {/* No "after indexes" figure here: a lower planner cost does not mean a faster query, and the
+              measured before/after (Database changes tab) runs on ≤100k-row copies, not on these tables */}
         </div>
       )}
 

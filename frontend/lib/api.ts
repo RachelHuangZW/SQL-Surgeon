@@ -56,6 +56,19 @@ export interface EstimateAnalysis {
   consequences: EstimateConsequence[]
 }
 
+// Computed by backend sql_surgeon/plan/benchmark.py: the same sandbox copies before and after the suggested indexes
+export interface BenchmarkTotals {
+  execution_ms: number
+  shared_hit: number    // 8 kB pages found in shared buffers
+  shared_read: number   // 8 kB pages that had to be read in
+}
+
+export interface BenchmarkSummary {
+  before: BenchmarkTotals
+  after: BenchmarkTotals
+  indexes: { ddl: string; name: string | null; used: boolean }[]   // used = the "after" plan scans it
+}
+
 export interface AnalysisResult {
   status: string
   rewrite_warnings: string[] | null
@@ -67,16 +80,18 @@ export interface AnalysisResult {
   advice: string[] | null
   filtered_indexes: IndexRecommendation[] | null
   benchmark_result: object[] | null
+  benchmark_summary: BenchmarkSummary | null
+  benchmark_error: string | null   // why there is no benchmark; the rest of the result is still valid
   optimized_sql: string | null
   execution_time_ms: number | null
   error: string | null
 }
 
-export async function analyze(sql: string, ddl: string, table_name = ''): Promise<AnalysisResult> {
+export async function analyze(sql: string, ddl: string, runBenchmark = false): Promise<AnalysisResult> {
   const response = await fetch(`${API_URL}/api/diagnose`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ original_sql: sql, ddl, table_name }),
+    body: JSON.stringify({ original_sql: sql, ddl, run_benchmark: runBenchmark }),
   })
 
   if (!response.ok) {

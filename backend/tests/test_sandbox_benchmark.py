@@ -116,6 +116,15 @@ else:
     plan, skipped = db.benchmark_in_sandbox(QUERY, "ANALYZE title, company_name (name);")
     check("ANALYZE runs on the copies only and isn't reported as skipped", isinstance(plan, list) and skipped == [])
 
+    admin_one("CREATE VIEW sandbox_test_view AS SELECT * FROM kind_type; "
+              "GRANT SELECT ON sandbox_test_view TO sql_surgeon_sandbox; SELECT 1")
+    try:
+        e = raises(lambda: db.benchmark_in_sandbox("SELECT * FROM sandbox_test_view", ""), UnsafeSQLError)
+    finally:
+        admin_one("DROP VIEW sandbox_test_view; SELECT 1")
+    check("a view (planned as its real tables) → refused before EXPLAIN ANALYZE",
+          e is not None and "public.kind_type" in str(e))
+    
     check("kind_type untouched", admin_one("SELECT count(*) FROM kind_type") == 7)
     check("no sandbox schema left behind",
           admin_one("SELECT count(*) FROM pg_namespace WHERE nspname LIKE 'surgeon_tmp_%'") == 0)

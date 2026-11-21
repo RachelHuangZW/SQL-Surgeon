@@ -370,9 +370,9 @@ All cost values are PostgreSQL's internal planner estimates. Actual runtime requ
 
 The user-facing `generate_benchmark_schema` copies only ≤100k rows. For LIKE queries on large text columns, GIN index adoption may not be visible in the sandbox because planner statistics differ from the real table.
 
-### 6. Suggested trigram GIN indexes fail to build in the sandbox
+### 6. Queries on views or partitioned tables are not benchmarked
 
-Suggested `pg_trgm` GIN indexes fail to build in the sandbox benchmark because its `search_path` excludes `public` ([#2](https://github.com/RachelHuangZW/SQL-Surgeon/issues/2)).
+The sandbox copies the tables a query's plan reads. For a view or a partitioned table those are the underlying tables, while the name in the query still resolves to the real object, so the benchmark refuses such a query rather than run it on real data.
 
 ### 7. GIN/GiST/BRIN recommendations are not checked against the schema
 
@@ -654,9 +654,12 @@ Its guards, on top of the role:
 - Before running anything it checks `session_user` and refuses a superuser or a member of the roles above, in case the URL points at the wrong login.
 - Everything runs in **one transaction that is always rolled back**: the schema, the copies and the indexes never reach the database.
 - The **LLM-generated** script is allowlisted: only `CREATE INDEX` / `ANALYZE` on unqualified (sandbox) tables and `CREATE EXTENSION` for `pg_trgm`, `btree_gin`, `btree_gist`. Anything else is rejected before running.
+- The tables to copy come from the query's own plan (`EXPLAIN (VERBOSE)`, which doesn't run it), not from parsing the SQL text; a query reading outside `public` is refused.
+- `search_path` is `<sandbox>, public`: the copies first, then `public` for what extensions installed there provide (e.g. `gin_trgm_ops`, [#2](https://github.com/RachelHuangZW/SQL-Surgeon/issues/2)). A suggested `CREATE INDEX` on a table the query doesn't read (so it wasn't copied) is skipped and reported in `rewrite_warnings`; `ANALYZE` runs on the copies only.
+- Right before `EXPLAIN ANALYZE`, the query is planned once more and refused unless every table it reads is a sandbox copy.
 - The original query must pass the single-statement check and the query-only allowlist; table and schema names are quoted.
 
-`tests/test_sandbox_benchmark.py` checks that a data-modifying CTE on a real table, `pg_terminate_backend` on another session and `set_config('role', ...)` are all denied under this role.
+`tests/test_sandbox_benchmark.py` checks that a data-modifying CTE on a real table, `pg_terminate_backend` on another session and `set_config('role', ...)` are all denied under this role, that a pg_trgm GIN index builds and is used, and that a query through a view is refused.
 
 Everything else (`run_explain`'s plan, metadata and primary-key lookups, the hypopg schema check) runs on the read-only path and never writes. Earlier versions created missing primary-key indexes here; that was removed — a table without a primary key is now only reported.
 

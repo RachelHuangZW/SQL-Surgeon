@@ -152,7 +152,8 @@ def ensure_query_statement(statement: str) -> None:
         )
 
 
-# Unqualified on purpose: with search_path set to the sandbox schema these can only reach the copies.
+# Unqualified on purpose: they resolve through the benchmark's search_path, where the sandbox copies come first.
+# A table that wasn't copied would fall through to public, so benchmark_in_sandbox skips DDL on it.
 _IDENT = r'(?:[A-Za-z_][A-Za-z0-9_$]*|"[^".]+")'
 _LEADING_COMMENTS = re.compile(r"(?:\s+|--[^\n]*(?:\n|$)|/\*.*?\*/)*", re.DOTALL)
 _CREATE_INDEX = re.compile(
@@ -215,6 +216,10 @@ def analyze_tables(statement: str) -> list:
     without_columns = re.sub(r"\([^()]*\)", "", statement)
     return [_ident_name(t) for t in _ANALYZE_TABLE.findall(without_columns)]
 
+def planned_relations(cursor, statement: str) -> set:
+        """{(schema, table)} the statement would read under the current search_path. Plain EXPLAIN: nothing runs."""
+        cursor.execute(f"EXPLAIN (VERBOSE, FORMAT JSON) {statement}")
+        return plan_relations(cursor.fetchone()["QUERY PLAN"])
 
 def plan_relations(plan) -> set:
     """{(schema, table)} of every table a plan reads, from EXPLAIN (VERBOSE, FORMAT JSON)."""
@@ -514,8 +519,7 @@ class DBClient:
                 cursor.execute("SET LOCAL statement_timeout = '300s'")  # DDL + EXPLAIN ANALYZE
                 cursor.execute("SET LOCAL lock_timeout = %s", (self.config.lock_timeout_ms,))
                 cursor.execute("SET LOCAL search_path TO public")
-                cursor.execute(f"EXPLAIN (VERBOSE, FORMAT JSON) {statement}")
-                relations = plan_relations(cursor.fetchone()["QUERY PLAN"])
+                relations = planned_relations(cursor, statement)
                 outside = sorted(f"{s}.{t}" for s, t in relations if s != "public")
                 if outside:
                     raise UnsafeSQLError(f"The sandbox only copies tables from public; the query reads {', '.join(outside)}")
@@ -548,8 +552,13 @@ class DBClient:
                                 cursor.execute(pgsql.SQL("ANALYZE {}.{}").format(schema, pgsql.Identifier(t)))
                     else:
                         cursor.execute(ddl)
-
+                
+                outside = sorted(f"{s}.{t}" for s, t in planned_relations(cursor, statement) if s != schema_name)
+                if outside:
+                    raise UnsafeSQLError(f"The query would read {', '.join(outside)} outside the sandbox, so it isn't benchmarked")
+                
                 cursor.execute(f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {statement}")
+                
                 return cursor.fetchone()["QUERY PLAN"], skipped
 
         except Exception as e:

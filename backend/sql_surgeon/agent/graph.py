@@ -26,9 +26,8 @@ def should_continue(state: AgentState):
 def route_after_review(state: AgentState):
     if state.get("error"):
         return "end"
-    if (state.get("retry_count") or 0) >= MAX_RETRY_COUNT:
-        return "end"
-    if state.get("verdict") == "retry":
+    # Out of retries the last advice is what the user gets, so it's still benchmarked when asked for
+    if state.get("verdict") == "retry" and (state.get("retry_count") or 0) < MAX_RETRY_COUNT:
         return "retry"
     if state.get("run_benchmark"):
         return "benchmark"

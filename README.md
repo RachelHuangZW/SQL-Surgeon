@@ -56,7 +56,7 @@ The shared state (`AgentState` TypedDict) passed between nodes:
 | `original_sql` | str | Input query |
 | `normalized_sql` | str | Same query with explicit JOINs, for the LLM to read only |
 | `ddl` | str | Table DDL (user-provided or auto-fetched), plus existing indexes and missing-PK notes |
-| `run_benchmark` | bool | Whether to run sandbox benchmark after advice passes review |
+| `run_benchmark` | bool | Whether to run the sandbox benchmark on the final advice |
 | `explain_output` | list[dict] | EXPLAIN ANALYZE JSON plan |
 | `plan_table` | list[dict] | The plan flattened to one row per node: estimated vs. actual rows, loops, q-error, processes, conditions |
 | `estimate_analysis` | dict | `{"origins": [...], "consequences": [...]}` from the [misestimate analysis](#misestimate-analysis) |
@@ -71,7 +71,10 @@ The shared state (`AgentState` TypedDict) passed between nodes:
 | `feedback` | str | Reviewer's (and the schema check's) feedback if verdict was `retry` |
 | `verdict` | str | `pass` or `retry` |
 | `retry_count` | int | Number of retry verdicts so far |
-| `benchmark_result` | list[dict] | EXPLAIN ANALYZE from sandbox benchmark |
+| `benchmark_result` | list[dict] | EXPLAIN ANALYZE in the sandbox, with the suggested indexes |
+| `benchmark_baseline` | list[dict] | EXPLAIN ANALYZE on the same sandbox copies, before the suggested indexes |
+| `benchmark_summary` | dict | `{"before", "after", "indexes"}`: execution time and buffers of both runs, and whether the "after" plan uses each suggested index |
+| `benchmark_error` | str | Why there is no benchmark when one was asked for; the rest of the result is still valid |
 | `total_input_tokens` / `total_output_tokens` | int | LLM token usage across all calls |
 | `error` | str | First error encountered |
 
@@ -417,7 +420,8 @@ SQL-Surgeon/
 │   │   │   └── graph.py    # LangGraph StateGraph + routing logic
 │   │   ├── plan/
 │   │   │   ├── table.py    # Flatten EXPLAIN JSON into per-node rows (q-error, loops, processes)
-│   │   │   └── estimates.py # Misestimate origins and consequences
+│   │   │   ├── estimates.py # Misestimate origins and consequences
+│   │   │   └── benchmark.py # Sandbox benchmark before/after figures
 │   │   └── db/
 │   │       ├── client.py   # DBClient: hardened read-only query/EXPLAIN, metadata, hypopg index check, sandbox benchmark
 │   │       └── config.py   # Security settings from env (read-only DSN, timeouts, pool size)
@@ -429,12 +433,13 @@ SQL-Surgeon/
 │   │   ├── test_db_regression.py    # (DB) Read-only transaction, timeouts, pool, session reset
 │   │   ├── test_plan_table.py       # Plan flattening, q-error, processes under Gather
 │   │   ├── test_estimates.py        # Origins, consequences, Memoize, parallel time share
+│   │   ├── test_benchmark_summary.py  # Before/after figures, which suggested indexes the plan uses
 │   │   ├── test_small_tables.py     # Small-table filter
 │   │   ├── test_analyze_step.py     # Step 3 ANALYZE only for expression indexes
 │   │   ├── test_issue_parsing.py    # Issues linked to plan nodes
 │   │   ├── test_invalid_indexes.py  # Dropping / feeding back indexes the schema rejects
 │   │   ├── test_index_check.py      # (DB) hypopg schema check + review_advice retry
-│   │   └── test_sandbox_benchmark.py  # (DB) Sandbox login refusals; escapes denied under sql_surgeon_sandbox
+│   │   └── test_sandbox_benchmark.py  # (DB) Sandbox login refusals, escapes denied, GIN, baseline before the indexes
 │   ├── scripts/            # Saved JOB 11d plans used as test fixtures, CSV import helper
 │   ├── eval/
 │   │   ├── run_eval.py     # Eval harness: B1/B2/combined baselines + surgeon metrics
@@ -560,13 +565,18 @@ for t in tests/test_*.py; do echo "== $t"; python "$t" | tail -1; done
   "execution_time_ms": 812.4,
   "optimized_sql": "-- Step 1: Create indexes (run once)\nCREATE INDEX ...\n\n-- Step 2: Run the optimized query\nSELECT ...",
   "benchmark_result": null,
+  "benchmark_baseline": null,
+  "benchmark_summary": null,
+  "benchmark_error": null,
   "error": null
 }
 ```
 
 `plan_table` ids are what `estimate_analysis` and `issue_node_ids` refer to. The frontend shows the result in tabs: **Summary** (recommendations), **Diagnosis** (the plan table with misestimate origins and consequences marked; clicking an issue highlights its nodes) and **Database changes** (each index with its reason, and the full script to copy). A **SQL changes** tab for query/application-level suggestions is a placeholder for now.
 
-When `run_benchmark: true`, `benchmark_result` contains an `EXPLAIN ANALYZE` result from the sandbox benchmark (all tables in the query are copied to the sandbox schema). It needs `SURGEON_SANDBOX_DATABASE_URL`; without it, `error` says so and `benchmark_result` stays `null`.
+When `run_benchmark: true` (the **Benchmark the suggested indexes** checkbox in the frontend), the query runs twice on the same sandbox copies: `benchmark_baseline` before the suggested indexes, `benchmark_result` after them. `benchmark_summary` holds the figures the **Database changes** tab shows: both execution times, buffers, and which suggested indexes the "after" plan uses. Only the order of the two runs differs; run back to back without any new index, they agree to within about 10%, because the fresh copies are already in shared buffers. The times come from ≤100k-row copies, so they don't carry over to the full tables; whether the planner picks an index up is what does.
+
+If the benchmark can't run (no `SURGEON_SANDBOX_DATABASE_URL`, no index recommended, a query through a view, ...), `benchmark_error` says why and the diagnosis and advice are still returned. It also runs when the reviewer's retries are used up: the last advice is what the user gets.
 
 ### `GET /api/health`
 
@@ -652,14 +662,14 @@ Its guards, on top of the role:
 
 - No fallback: without `SURGEON_SANDBOX_DATABASE_URL` it raises `SandboxNotConfiguredError` instead of using `DATABASE_URL`.
 - Before running anything it checks `session_user` and refuses a superuser or a member of the roles above, in case the URL points at the wrong login.
-- Everything runs in **one transaction that is always rolled back**: the schema, the copies and the indexes never reach the database.
+- Everything runs in **one transaction that is always rolled back**: the schema, the copies and the indexes never reach the database. That includes both runs of the query, the baseline and the one with the suggested indexes.
 - The **LLM-generated** script is allowlisted: only `CREATE INDEX` / `ANALYZE` on unqualified (sandbox) tables and `CREATE EXTENSION` for `pg_trgm`, `btree_gin`, `btree_gist`. Anything else is rejected before running.
 - The tables to copy come from the query's own plan (`EXPLAIN (VERBOSE)`, which doesn't run it), not from parsing the SQL text; a query reading outside `public` is refused.
 - `search_path` is `<sandbox>, public`: the copies first, then `public` for what extensions installed there provide (e.g. `gin_trgm_ops`, [#2](https://github.com/RachelHuangZW/SQL-Surgeon/issues/2)). A suggested `CREATE INDEX` on a table the query doesn't read (so it wasn't copied) is skipped and reported in `rewrite_warnings`; `ANALYZE` runs on the copies only.
 - Right before `EXPLAIN ANALYZE`, the query is planned once more and refused unless every table it reads is a sandbox copy.
 - The original query must pass the single-statement check and the query-only allowlist; table and schema names are quoted.
 
-`tests/test_sandbox_benchmark.py` checks that a data-modifying CTE on a real table, `pg_terminate_backend` on another session and `set_config('role', ...)` are all denied under this role, that a pg_trgm GIN index builds and is used, and that a query through a view is refused.
+`tests/test_sandbox_benchmark.py` checks that a data-modifying CTE on a real table, `pg_terminate_backend` on another session and `set_config('role', ...)` are all denied under this role, that a pg_trgm GIN index builds and is used, that a query through a view is refused, and that the baseline runs without the suggested index while the second run uses it.
 
 Everything else (`run_explain`'s plan, metadata and primary-key lookups, the hypopg schema check) runs on the read-only path and never writes. Earlier versions created missing primary-key indexes here; that was removed — a table without a primary key is now only reported.
 

@@ -5,6 +5,7 @@ from .prompts import ANALYSIS_PROMPT
 from .prompts import ADVICE_PROMPT
 from .prompts import REVIEW_ADVICE_PROMPT
 from ..plan.estimates import analyze_estimates, format_estimates_for_llm
+from ..plan.benchmark import benchmark_summary
 
 import re
 import json
@@ -831,24 +832,30 @@ def review_advice(state: AgentState):
 
 def generate_benchmark_schema(state: AgentState):
     # Node 5: create benchmark schema for testing
+    # Failures go to benchmark_error, not error: the diagnosis and the advice are still valid without it
     dsn = os.getenv("DATABASE_URL")
     if not dsn:
-        return {"error": "DATABASE_URL not set"}
+        return {"benchmark_error": "DATABASE_URL not set"}
 
     db_client = DBClient(dsn)
 
     original_sql = state.get("original_sql")
     if not state.get("optimized_sql"):
-        return {"error": "No optimized SQL to benchmark"}
+        return {"benchmark_error": "No indexes were recommended, so there is nothing to benchmark"}
 
     suggested_ddl = state.get("optimized_sql")
-    
-    try:
-        new_plan, skipped = db_client.benchmark_in_sandbox(original_sql, suggested_ddl)
-        warnings = list(state.get("rewrite_warnings") or [])
-        for ddl in skipped:
-            warnings.append(f"Not benchmarked: {ddl}; the query doesn't read this table, so the index can't change its plan")
-        return {"benchmark_result": new_plan, "rewrite_warnings": warnings}
 
+    try:
+        benchmark = db_client.benchmark_in_sandbox(original_sql, suggested_ddl)
     except Exception as e:
-        return {"error": f"Database Execution Failure: {str(e)}"}
+        return {"benchmark_error": f"The sandbox benchmark failed: {e}"}
+
+    warnings = list(state.get("rewrite_warnings") or [])
+    for ddl in benchmark["skipped"]:
+        warnings.append(f"Not benchmarked: {ddl}; the query doesn't read this table, so the index can't change its plan")
+    return {
+        "benchmark_baseline": benchmark["before"],
+        "benchmark_result": benchmark["after"],
+        "benchmark_summary": benchmark_summary(benchmark),
+        "rewrite_warnings": warnings,
+    }

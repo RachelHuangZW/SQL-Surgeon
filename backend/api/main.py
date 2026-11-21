@@ -38,6 +38,11 @@ class DiagnoseResponse(BaseModel):
     filtered_indexes: Optional[List[dict]]
     execution_time_ms: Optional[float]
     benchmark_result: Optional[List[dict]]
+    # The same sandbox copies before the suggested indexes, the figures the frontend shows, and why
+    # there is no benchmark when one was asked for (the rest of the response is still valid)
+    benchmark_baseline: Optional[List[dict]] = None
+    benchmark_summary: Optional[dict] = None
+    benchmark_error: Optional[str] = None
     optimized_sql: Optional[str]
     error: Optional[str]
 
@@ -84,6 +89,9 @@ async def diagnose_sql(request: DiagnoseRequest):
             filtered_indexes = final_state.get("filtered_indexes"),
             execution_time_ms = (final_state.get("explain_output") or [{}])[0].get("Execution Time"),
             benchmark_result = final_state.get("benchmark_result"),
+            benchmark_baseline = final_state.get("benchmark_baseline"),
+            benchmark_summary = final_state.get("benchmark_summary"),
+            benchmark_error = final_state.get("benchmark_error"),
             optimized_sql = final_state.get("optimized_sql"),
             error = None
         )

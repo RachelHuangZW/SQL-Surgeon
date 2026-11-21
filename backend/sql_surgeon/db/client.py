@@ -221,6 +221,12 @@ def planned_relations(cursor, statement: str) -> set:
         cursor.execute(f"EXPLAIN (VERBOSE, FORMAT JSON) {statement}")
         return plan_relations(cursor.fetchone()["QUERY PLAN"])
 
+def sandbox_index_names(cursor, schema_name: str) -> set:
+    """Names of the indexes in the sandbox schema."""
+    cursor.execute("SELECT indexname FROM pg_indexes WHERE schemaname = %s", (schema_name,))
+    return {row["indexname"] for row in cursor.fetchall()}
+
+
 def plan_relations(plan) -> set:
     """{(schema, table)} of every table a plan reads, from EXPLAIN (VERBOSE, FORMAT JSON)."""
     if not plan:
@@ -540,8 +546,19 @@ class DBClient:
                 # The copies come first; public is there for what extensions installed in it provide,
                 # such as pg_trgm's gin_trgm_ops operator class (GH#2)
                 cursor.execute(pgsql.SQL("SET LOCAL search_path TO {}, public").format(schema))
-                
+
+                # Checked before the first EXPLAIN ANALYZE: the baseline runs the query too.
+                # The suggested script can't change this: it only adds indexes, statistics and extensions.
+                outside = sorted(f"{s}.{t}" for s, t in planned_relations(cursor, statement) if s != schema_name)
+                if outside:
+                    raise UnsafeSQLError(f"The query would read {', '.join(outside)} outside the sandbox, so it isn't benchmarked")
+
+                # Baseline: the same copies with only the indexes the real tables already have (#16)
+                cursor.execute(f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {statement}")
+                before = cursor.fetchone()["QUERY PLAN"]
+
                 skipped = []
+                indexes = []
                 for ddl in setup:
                     table = index_table(ddl)
                     if table is not None and table not in tables:
@@ -550,16 +567,18 @@ class DBClient:
                         for t in analyze_tables(ddl):
                             if t in tables:
                                 cursor.execute(pgsql.SQL("ANALYZE {}.{}").format(schema, pgsql.Identifier(t)))
+                    elif table is not None:
+                        # PostgreSQL names an unnamed index itself, and the plan refers to it by that name
+                        existing = sandbox_index_names(cursor, schema_name)
+                        cursor.execute(ddl)
+                        built = sandbox_index_names(cursor, schema_name) - existing
+                        indexes.append({"ddl": ddl, "name": built.pop() if built else None})
                     else:
                         cursor.execute(ddl)
-                
-                outside = sorted(f"{s}.{t}" for s, t in planned_relations(cursor, statement) if s != schema_name)
-                if outside:
-                    raise UnsafeSQLError(f"The query would read {', '.join(outside)} outside the sandbox, so it isn't benchmarked")
-                
+
                 cursor.execute(f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {statement}")
-                
-                return cursor.fetchone()["QUERY PLAN"], skipped
+                after = cursor.fetchone()["QUERY PLAN"]
+                return {"before": before, "after": after, "indexes": indexes, "skipped": skipped}
 
         except Exception as e:
             logger.error(f"Error running sandbox benchmark: {e}")
